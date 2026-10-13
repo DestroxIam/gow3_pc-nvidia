@@ -195,6 +195,31 @@ duas.
   `git apply` do submódulo sob o alias (gitfile relativo), então o build usa cmake e ninja
   direto (`scratchpad/build_g.sh` da sessão) e `package.sh` roda no caminho longo.
 
+## 7c. Atualização de 2026-10-13, segunda rodada (RX 6650 XT, jleandrocampos em #65)
+
+- **Pin de subgrupo descartado:** execuções 1 (`all`) e 3 (`none` + barreiras de LDS) com cache
+  limpo, linhas iguais nas duas; o log confirma a política aplicada. Mesmo resultado nos três
+  logs do MarcosAlexandre30 (RX 6600).
+- **`GOW3_WAVE_STATS` é cego na AMD:** `VkPipelineExecutablePropertiesKHR::subgroupSize` vem 0
+  para todo executável gráfico, 64 só em compute. O build 3 acrescentou `VK_AMD_shader_info`
+  (VGPRs físicos na chave, ISA em `user\shaders\wave_dumps`), ainda sem resultado.
+- **Nenhum fragment shader depende do tamanho da wave:** o reporter varreu 1152 módulos SPIR-V
+  do cache: 76 `OpGroupNonUniformQuadBroadcast` (quad, independe da wave) e 4 ballots, todos em
+  compute.
+- **O shadPS4 0.19.0 oficial reproduz** as linhas na 6650 XT (binários distintos, mesma cena).
+  Não há regressão do eltutz a procurar; a causa está no núcleo compartilhado ou no driver.
+- **42 toggles desligados ao vivo** (`GOW3_TOGGLE_FILE` = 182395781688328191) e
+  `GOW3_SQUARE_PASS=0`: linhas continuam.
+- **`last_run.log` só era gravado pelo `--play`** (`Play God of War III.exe`); o PLAY da janela
+  mandava a saída para a aba Log. Corrigido em `8a4e890` (ambos gravam o mesmo arquivo).
+- **Pistas restantes:** bloco de 8x4 px em RGBA8 = 128 bytes = bloco de DCC; o driver AMD não
+  expõe `VK_EXT_image_compression_control`. Barreira faltando entre uma escrita única (LUT ou
+  textura gerada por shader) e a primeira leitura explicaria estático por execução, aleatório
+  por lançamento, dependente de timing e cache (Infinity Cache 32 MB na Navi 23, 96 MB na Navi
+  22) e restrito à iluminação. Teste: `GOW3_FULL_BARRIERS=1` (`4fcd91f`, build de teste 4
+  `windows-v2.1.7-test4`) e validação de sincronização (`GOW3_VK_VALIDATION=1`
+  `GOW3_VK_VALIDATION_SYNC=1`, exige o Vulkan SDK).
+
 ## 8. Perguntas em aberto
 
 1. Algum compute antes do passe translúcido tem workgroup de 64, LDS e nenhum `s_barrier`?
