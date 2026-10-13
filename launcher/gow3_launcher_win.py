@@ -22,7 +22,6 @@ import runpy
 import shutil
 import stat
 import signal
-import struct
 import subprocess
 import sys
 import tempfile
@@ -40,7 +39,8 @@ PORT_DIR = Path(sys.executable).resolve().parent if FROZEN else Path(__file__).r
 sys.path.insert(0, str(PORT_DIR / 'scripts'))
 import save_backup  # noqa: E402  (scripts/)
 import steam_shortcut  # noqa: E402  (scripts/)
-from prepare import read_sfo, sfo  # noqa: E402  (scripts/)
+from patches import game_profile, game_sfo  # noqa: E402  (scripts/)
+from prepare import load_sfo  # noqa: E402  (scripts/)
 DATA_DIR = Path(os.environ.get('GOW3_DATA_DIR', PORT_DIR))
 CONFIG_DIR = (Path(os.environ.get('APPDATA', Path.home())) if WINDOWS else
               Path(os.environ.get('XDG_CONFIG_HOME') or Path.home() / '.config')) / 'gow3-launcher'
@@ -415,7 +415,7 @@ def game_info(folder):
     folder = Path(folder or '.')
     if not (folder / 'eboot.bin').is_file():
         return None
-    values = read_sfo(folder / 'sce_sys/param.sfo') or {}
+    values = game_sfo(folder)
     return values.get('TITLE', APP_NAME).replace('™', '').replace('®', '').strip(), values.get('APP_VER', '?')
 
 
@@ -439,18 +439,17 @@ def linux_tools():
                 glob.glob(os.path.join(d, '*angoHud*.json')) for d in VULKAN_LAYER_DIRS)}
 
 
-REQUIRED_GAME_FILES = ('eboot.bin', 'sce_sys/param.sfo', 'sce_module/libc.prx', 'sce_module/libSceFios2.prx')
-
-
 def file_state(path):
-    """'ok', 'missing', 'empty' or 'unreadable' for a file the port needs, from one stat: an
-    empty one (a copy that failed, a placeholder made by hand) is as good as missing."""
+    """'ok', 'missing', 'folder', 'empty' or 'unreadable' for a file the port needs, from one
+    stat: an empty one (a copy that failed, a placeholder made by hand) is as good as missing."""
     try:
         status = Path(path).stat()
     except (FileNotFoundError, NotADirectoryError):
         return 'missing'
     except OSError:
         return 'unreadable'
+    if stat.S_ISDIR(status.st_mode):
+        return 'folder'
     if not stat.S_ISREG(status.st_mode):
         return 'missing'
     return 'empty' if status.st_size == 0 else 'ok'
@@ -466,39 +465,40 @@ def sfo_state(path):
     if state != 'ok':
         return state
     try:
-        sfo(Path(path).read_bytes())
+        load_sfo(path)
     except OSError:
         return 'unreadable'
-    except (ValueError, TypeError, IndexError, struct.error):
+    except ValueError:
         return 'invalid'
     return 'ok'
 
 
-def state_of(name, path):
-    """The state of the game file `name` at `path`: a param.sfo is parsed, the rest stat'ed."""
-    return sfo_state(path) if Path(name).name.casefold() == 'param.sfo' else file_state(path)
+# The files the port loads from a dump, each with the check it must pass.
+REQUIRED_GAME_FILES = (('eboot.bin', file_state), ('sce_sys/param.sfo', sfo_state),
+                       ('sce_module/libc.prx', file_state), ('sce_module/libSceFios2.prx', file_state))
+REQUIRED_UPDATE_FILES = REQUIRED_GAME_FILES[:2]
 
 
-REQUIRED_UPDATE_FILES = ('eboot.bin', 'sce_sys/param.sfo')
-
-
-def missing_game_files(folder, names=REQUIRED_GAME_FILES):
-    """[(name, state)] for the files of `names` the port needs that are not usable in the folder:
-    an incomplete dump, a placeholder made by hand, a file this user may not read, a param.sfo
+def missing_game_files(folder, requirements=REQUIRED_GAME_FILES):
+    """[(name, state)] for the required files that do not pass their check in the folder: an
+    incomplete dump, a placeholder made by hand, a file this user may not read, a param.sfo
     that is not one."""
     folder = Path(folder or '.')
-    return [(name, state) for name in names if (state := state_of(name, folder / name)) != 'ok']
+    return [(name, state) for name, check in requirements if (state := check(folder / name)) != 'ok']
 
 
 def describe_missing(missing):
     """The entries of missing_game_files as shown to the player."""
-    labels = {'empty': _('{} (empty)'), 'unreadable': _('{} (unreadable)'), 'invalid': _('{} (not a param.sfo)')}
+    labels = {'empty': _('{} (empty)'), 'unreadable': _('{} (unreadable)'),
+              'invalid': _('{} (not a param.sfo)'), 'folder': _('{} (a folder, not a file)')}
     return [labels[state].format(name) if state in labels else name for name, state in missing]
 
 
 def ready_to_play(game_dir, update_dir=''):
     """Whether --play (Steam, "Play God of War III.exe") may start the game at once; anything
     the Play button would refuse opens the launcher window instead."""
+    if update_dir and same_folder(update_dir, game_dir or '.'):
+        return False
     return not (missing_game_files(game_dir)
                 or (update_dir and missing_game_files(update_dir, REQUIRED_UPDATE_FILES)))
 
@@ -516,20 +516,20 @@ def system_files_beside(folder, reference=None, base=None):
     folder the title must be that of `reference` (the base game's param.sfo values); an Sc0
     beside the base game itself (`base`) is the base game's own unless the base game's param.sfo
     says another version."""
-    from patches import game_profile
     folder = Path(os.path.abspath(folder or '.'))
     if sfo_state(folder / 'sce_sys/param.sfo') in ('ok', 'unreadable') or folder.parent == folder:
         return None
     try:
-        with os.scandir(folder.parent) as entries:
-            names = [e.name for e in entries if e.is_dir(follow_symlinks=False) and e.name.casefold() == 'sc0']
+        with os.scandir(folder.parent) as entries:  # a linked Sc0 (mklink /J) counts too
+            names = [e.name for e in entries if e.is_dir() and e.name.casefold() == 'sc0']
     except OSError:
         return None
     if len(names) != 1 or os.path.normcase(names[0]) == os.path.normcase(folder.name):
         return None
     sibling = folder.parent / names[0]
-    values = read_sfo(sibling / 'param.sfo')
-    if values is None:
+    try:
+        values = load_sfo(sibling / 'param.sfo')
+    except (OSError, ValueError):
         return None
     title = values.get('TITLE')
     if not game_profile(values.get('TITLE_ID'), title if isinstance(title, str) else None):
@@ -561,15 +561,19 @@ def adopt_system_files(source, game):
     returns the relative names copied. Each file lands whole or not at all, and param.sfo goes
     last: while it is missing, a copy that failed halfway is offered again."""
     source, target = Path(source), Path(game) / 'sce_sys'
+
+    def unreadable(error):  # os.walk would skip the folder silently
+        raise error
     files = sorted(((Path(directory) / name).relative_to(source)
-                    for directory, _folders, names in os.walk(source) for name in names),
+                    for directory, _folders, names in os.walk(source, onerror=unreadable) for name in names),
                    key=lambda relative: (relative.as_posix() == 'param.sfo', relative.as_posix()))
     copied = []
     for relative in files:
         destination = target / relative
         if destination.is_dir():
             raise OSError(f'{destination} is a folder: {source / relative} cannot replace it')
-        if state_of(relative.name, destination) == 'ok':
+        check = sfo_state if relative.as_posix() == 'param.sfo' else file_state
+        if check(destination) == 'ok':
             continue
         destination.parent.mkdir(parents=True, exist_ok=True)
         with replacing(destination) as part:
@@ -1805,28 +1809,47 @@ class Launcher:
         """A PKG extraction (game or update) has its system files beside the game: offers the
         copy (system_files_beside) for the game folder and for an update folder with an
         eboot.bin, the update's candidate checked against the game's param.sfo. False when a
-        copy failed."""
+        copy was started: it runs in the background and presses Play again when it ends."""
         game_dir = self.app['game_dir'] or '.'
         update_dir = self.app.get('update_dir') or ''
         folders = [(game_dir, False)]
         if update_dir and not same_folder(update_dir, game_dir) and (Path(update_dir) / 'eboot.bin').is_file():
             folders.append((update_dir, True))
         for folder, is_update in folders:
-            reference = read_sfo(Path(game_dir) / 'sce_sys/param.sfo') if is_update else None
+            reference = (game_sfo(game_dir) or None) if is_update else None
             source = system_files_beside(folder, reference, game_dir if is_update else None)
             if not source or not self.messagebox.askyesno(APP_NAME, _(
                     'The files in {} look like a PKG extraction: the system files (param.sfo, icon0.png, '
                     'pic1.png and the rest) are in\n\n{}\n\nCopy all of them into its sce_sys folder now? '
                     'Files already there are kept.').format(folder, source)):
                 continue
+            self.adopt_in_background(source, folder)
+            return False
+        return True
+
+    def adopt_in_background(self, source, folder):
+        """Copies the Sc0 files off the Tk thread (a slow drive would freeze the window), shows
+        the result and presses Play again, so the next offer or check follows from what is on
+        disk."""
+        self.play_button.configure(state='disabled')
+        self.status.configure(text=_('Copying the system files…'), fg=TEXT)
+
+        def work():
+            error = None
             try:
                 adopt_system_files(source, folder)
-            except OSError as error:
-                self.messagebox.showerror(APP_NAME, _('Could not copy the files: {}').format(error))
-                self.game_changed()  # whatever was copied before the failure already shows
-                return False
-            self.game_changed()
-        return True
+            except OSError as failure:
+                error = failure
+
+            def done():
+                self.game_changed()  # whatever was copied already shows
+                if error:
+                    self.messagebox.showerror(APP_NAME, _('Could not copy the files: {}').format(error))
+                    self.show('game')
+                else:
+                    self.play()
+            self.ui_calls.put(done)
+        threading.Thread(target=work, daemon=True).start()
 
     def play(self):
         if self.process:
@@ -1838,7 +1861,6 @@ class Launcher:
             self.show('game')
             return
         if not self.offer_system_files():
-            self.show('game')
             return
         missing = missing_game_files(self.app['game_dir'])
         if missing:
@@ -1848,6 +1870,11 @@ class Launcher:
             self.show('game')
             return
         update_dir = self.app.get('update_dir') or ''
+        if update_dir and same_folder(update_dir, self.app['game_dir'] or '.'):
+            self.messagebox.showerror(APP_NAME, _('Choose two separate folders for the game and its update, '
+                                                  'or leave the update folder empty.'))
+            self.show('game')
+            return
         missing = missing_game_files(update_dir, REQUIRED_UPDATE_FILES) if update_dir else []
         if missing:
             self.messagebox.showerror(APP_NAME, _('The update folder {} is incomplete. Missing or empty files:\n\n{}\n\n'

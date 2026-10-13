@@ -3,7 +3,7 @@ import struct
 import unittest
 import tempfile
 from pathlib import Path
-from prepare import parse_self, inspect_libc, nid, prepare, read_self, read_sfo, sfo, write_report
+from prepare import parse_self, inspect_libc, load_sfo, nid, prepare, read_self, read_sfo, sfo, write_report
 
 
 def fixture():
@@ -97,8 +97,13 @@ class SelfTests(unittest.TestCase):
                 inspect_libc(game / 'libc.prx')
             with self.assertRaisesRegex(ValueError, 'libc.prx is empty'):
                 read_self(game / 'libc.prx')
-            # read_sfo answers None for anything that is not a param.sfo instead of raising.
+            # load_sfo tells a file that cannot be read (OSError) from one that is not a param.sfo
+            # (ValueError); read_sfo answers None for both instead of raising.
             (game / 'param.sfo').write_bytes(b'x')
+            with self.assertRaises(ValueError):
+                load_sfo(game / 'param.sfo')
+            with self.assertRaises(OSError):
+                load_sfo(game / 'none.sfo')
             self.assertIsNone(read_sfo(game / 'param.sfo'))
             self.assertIsNone(read_sfo(game / 'none.sfo'))
             self.assertIsNone(read_sfo(game))

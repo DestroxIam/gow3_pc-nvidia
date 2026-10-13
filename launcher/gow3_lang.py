@@ -740,10 +740,9 @@ LANGUAGE_NAMES = [('', ('System', 'Как в системе')), ('en', ('English
 WINDOWS_LANGUAGES = {0x19: 'ru', 0x01: 'ar', 0x0a: 'es', 0x16: 'pt', 0x0c: 'fr', 0x07: 'de', 0x10: 'it',
                      0x15: 'pl', 0x1f: 'tr', 0x04: 'zh', 0x11: 'ja', 0x12: 'ko'}
 
-# Texts added after the KEYS tables were written: English text -> translation, per language.
-# (Positional tables need every language updated at once; these are looked up by text.)
-# Texts added after the KEYS tables, translated to Portuguese (the port's own language) only:
-# the other languages fall back to English for them until someone who speaks them contributes.
+# Texts added after the KEYS tables were written, looked up by English text (positional tables
+# need every language updated at once). Portuguese only, the port's own language: the other
+# languages fall back to English for them until someone who speaks them contributes.
 EXTRA = {
     'pt': {
         'Display': 'Tela',
@@ -890,6 +889,9 @@ EXTRA = {
         '{} (empty)': '{} (vazio)',
         '{} (unreadable)': '{} (sem permissão de leitura)',
         '{} (not a param.sfo)': '{} (não é um param.sfo)',
+        '{} (a folder, not a file)': '{} (é uma pasta, não um arquivo)',
+        'Choose two separate folders for the game and its update, or leave the update folder empty.': 'Escolha duas pastas separadas para o jogo e o update, ou deixe a pasta do update em branco.',
+        'Copying the system files…': 'Copiando os arquivos de sistema…',
         'The update folder {} is incomplete. Missing or empty files:\n\n{}\n\nChoose the folder of the update (eboot.bin, sce_sys), or leave it empty.': 'A pasta do update {} está incompleta. Arquivos faltando ou vazios:\n\n{}\n\nEscolha a pasta do update (eboot.bin, sce_sys), ou deixe em branco.',
     },
 }

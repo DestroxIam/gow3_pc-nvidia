@@ -1,4 +1,5 @@
 import os
+import queue
 import struct
 import sys
 import unittest
@@ -139,14 +140,22 @@ class GameFilesTest(unittest.TestCase):
             # One that is there but cannot be read is 'unreadable', whether the stat or the read fails.
             from unittest import mock
             (folder / 'sce_sys/param.sfo').write_bytes(BASE_SFO)
-            real_read = Path.read_bytes
+            real_open = Path.open
 
-            def denied_read(path):
+            def denied_open(path, *args, **kwargs):
                 if path.name == 'param.sfo':
                     raise PermissionError(13, 'Access is denied', str(path))
-                return real_read(path)
-            with mock.patch.object(Path, 'read_bytes', denied_read):
+                return real_open(path, *args, **kwargs)
+            with mock.patch.object(Path, 'open', denied_open):
                 self.assertEqual(launcher.missing_game_files(folder), [('sce_sys/param.sfo', 'unreadable')])
+            # A folder in the file's place is named as such, not as missing.
+            (folder / 'sce_module/libc.prx').unlink()
+            (folder / 'sce_module/libc.prx').mkdir()
+            self.assertEqual(launcher.missing_game_files(folder), [('sce_module/libc.prx', 'folder')])
+            self.assertEqual(launcher.describe_missing([('sce_module/libc.prx', 'folder')]),
+                             ['sce_module/libc.prx (a folder, not a file)'])
+            (folder / 'sce_module/libc.prx').rmdir()
+            (folder / 'sce_module/libc.prx').write_bytes(b'x')
             # Empty files (a placeholder made by hand, a copy that failed) count as missing: the
             # game cannot start from them, and the message says which they are.
             (folder / 'eboot.bin').write_bytes(b'')
@@ -181,9 +190,10 @@ class GameFilesTest(unittest.TestCase):
             self.assertFalse(launcher.ready_to_play(folder))
             (folder / 'sce_sys').mkdir()
             (folder / 'sce_module').mkdir()
-            for name in launcher.REQUIRED_GAME_FILES:
+            for name, _check in launcher.REQUIRED_GAME_FILES:
                 (folder / name).write_bytes(BASE_SFO if name.endswith('param.sfo') else b'x')
             self.assertTrue(launcher.ready_to_play(folder))
+            self.assertFalse(launcher.ready_to_play(folder, str(folder)))  # one folder for both
             # The update folder, when set, must be complete as well.
             update = folder / 'update'
             (update / 'sce_sys').mkdir(parents=True)
@@ -248,7 +258,7 @@ class GameFilesTest(unittest.TestCase):
             self.assertFalse((game / 'sce_sys/trophy/trophy').exists())
             # For an update folder the candidate must be the same title in another version: the
             # base game's own Sc0 is not it.
-            base = launcher.read_sfo(root / 'Sc0/param.sfo')
+            base = launcher.load_sfo(root / 'Sc0/param.sfo')
             self.assertEqual(base['APP_VER'], '01.00')
             beside = root / 'Base0'  # the base game beside this folder: Sc0 at its version is its own
             self.assertIsNone(launcher.system_files_beside(game, reference=base, base=beside))
@@ -282,13 +292,13 @@ class GameFilesTest(unittest.TestCase):
             (root / 'Sc0/param.sfo').write_bytes(sfo_bytes(TITLE_ID='CUSA00001', TITLE='Other Game', APP_VER='01.00'))
             self.assertIsNone(launcher.system_files_beside(game))
             (root / 'Sc0/param.sfo').write_bytes(BASE_SFO)
-            real_read = Path.read_bytes
+            real_open = Path.open
 
-            def locked_read(path):
+            def locked_open(path, *args, **kwargs):
                 if 'Sc0' in path.parts:
                     raise PermissionError(13, 'Access is denied', str(path))
-                return real_read(path)
-            with mock.patch.object(Path, 'read_bytes', locked_read):
+                return real_open(path, *args, **kwargs)
+            with mock.patch.object(Path, 'open', locked_open):
                 self.assertIsNone(launcher.system_files_beside(game))
             self.assertEqual(launcher.system_files_beside(game), root / 'Sc0')
             # A drive root has no siblings to look at.
@@ -318,15 +328,23 @@ class GameFilesTest(unittest.TestCase):
             app.process = None
             app.app = {**launcher.APP_DEFAULTS, 'game_dir': str(game), 'update_dir': update}
             app.messagebox = mock.Mock()
+            app.ui_calls = queue.Queue()
             for name in ('collect', 'show', 'set_log', 'game_changed', 'play_button', 'status'):
                 setattr(app, name, mock.Mock())
             return app
 
         def play(app):
-            """Whether the game was started."""
+            """Whether the game was started. The copy runs in a worker thread that presses Play
+            again through ui_calls: both run here, in order."""
             with mock.patch.object(launcher.subprocess, 'Popen', return_value=mock.Mock()) as start, \
-                    mock.patch.object(launcher, 'GameJob'), mock.patch.object(launcher.threading, 'Thread'):
+                    mock.patch.object(launcher, 'GameJob'), mock.patch.object(launcher.threading, 'Thread') as thread:
                 app.play()
+                for call in thread.call_args_list:  # grows while the workers press Play again
+                    target = call.kwargs.get('target')
+                    if target is not None and target.__name__ == 'work':
+                        target()
+                        while not app.ui_calls.empty():
+                            app.ui_calls.get()()
             return start.called
 
         cases = [('yes', True, None), ('yes over an empty placeholder', True, b''),
@@ -357,7 +375,7 @@ class GameFilesTest(unittest.TestCase):
             app.messagebox.askyesno.return_value = True
             self.assertTrue(play(app))
             self.assertIn(str(root / 'update' / 'Sc0'), app.messagebox.askyesno.call_args.args[1])
-            self.assertEqual(launcher.read_sfo(update / 'sce_sys/param.sfo')['APP_VER'], '01.02')
+            self.assertEqual(launcher.game_sfo(update)['APP_VER'], '01.02')
         with self.subTest('update beside the base game'), tempfile.TemporaryDirectory() as root:
             # The base game's own Sc0 (same version) is never offered to the update folder, which
             # is then refused as incomplete.
@@ -410,12 +428,13 @@ class GameFilesTest(unittest.TestCase):
             self.assertFalse((update / 'sce_sys/param.sfo').exists())
             self.assertIn('sce_sys/param.sfo', app.messagebox.showerror.call_args.args[1])
         with self.subTest('update folder is the game folder'), tempfile.TemporaryDirectory() as root:
+            # Not offered twice, and refused before run.py would refuse it.
             root = Path(root)
-            game = extraction(root, 'game', '01.00')
+            game = extraction(root, 'game', '01.00', BASE_SFO)
             app = launcher_app(game, str(game) + os.sep)
-            app.messagebox.askyesno.return_value = False
             self.assertFalse(play(app))
-            self.assertEqual(app.messagebox.askyesno.call_count, 1)
+            app.messagebox.askyesno.assert_not_called()
+            self.assertIn('two separate folders', app.messagebox.showerror.call_args.args[1])
         with self.subTest('copy fails'), tempfile.TemporaryDirectory() as root:
             # One error, naming the cause; not the incomplete-dump message on top of it.
             root = Path(root)
