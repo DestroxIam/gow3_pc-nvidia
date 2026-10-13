@@ -50,6 +50,8 @@ All six were confirmed during the installed-launcher test. Other output sizes sc
 
 This is a community preview, not a full-campaign or performance benchmark. Camera-derived native motion, scene depth and jitter were validated; complete animated-object motion coverage and artifact-free rendering were not. NR adds cost and may change the look or produce artifacts. A Reflex warning was observed during startup; native SR and FG continued in the recorded test. Frame multipliers and a 240 FPS engine limit are not guarantees of sustained FPS.
 
+The optional frame-generation bridge can warn about missing depth/motion tags or Reflex during video/menu/scene transitions, and generation may pause. Native SR continued in the portable-build test. Keep FG off if a transition is affected.
+
 **NR is not bundled:** obtain the appropriate `nvngx_dlssnr.dll` separately, following the [mod author's guide](https://github.com/janblade/OptiScaler-F5-DLSSNR-Multipass/blob/ce9d544d0ac72de4dab4dfe56dcd4b74ba79aa69/INSTALL-DLSSNR.md), then use Compatibility mode. See [setup and exact runtime locations](docs/NVIDIA.md).
 
 Update this preview manually from this fork's Releases. Upstream automatic updates are disabled so they cannot replace the NVIDIA launcher. Preserve `Game/` and `user/` when updating.
