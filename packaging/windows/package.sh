@@ -3,7 +3,8 @@
 # with PyInstaller so players need no Python), gow3-probe.exe with the MSYS2 CLANG64 DLLs it needs,
 # the preparation scripts and run.py. Run from an MSYS2 CLANG64 shell after `bash build.sh`.
 # Freezing uses a Windows Python 3.10+ (python.org; WINPYTHON overrides) and a private venv in
-# out/pyenv with PyInstaller. The temporal upscalers are off, so neither the FSR 4 assets nor the
+# out/pyenv with PyInstaller and Pillow (the game icon and the Steam pictures need it). The
+# temporal upscalers are off, so neither the FSR 4 assets nor the
 # DLSS runtime are packaged.
 set -euo pipefail
 cd -- "$(dirname -- "$0")/../.."
@@ -23,7 +24,7 @@ export USERPROFILE=${USERPROFILE:-$(cygpath -w "/c/Users/$(id -un)")}
 if [[ ! -x out/pyenv/Scripts/python.exe ]]; then
     "$python" -m venv out/pyenv
 fi
-out/pyenv/Scripts/python.exe -m pip install -q --disable-pip-version-check pyinstaller
+out/pyenv/Scripts/python.exe -m pip install -q --disable-pip-version-check pyinstaller pillow
 # The scripts run inside God of War III.exe (--script): the standard modules they import come along.
 hidden=()
 for module in argparse base64 collections hashlib json re shutil struct tempfile xml.etree.ElementTree \
