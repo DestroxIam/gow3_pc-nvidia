@@ -39,7 +39,7 @@ import save_backup  # noqa: E402  (scripts/)
 import steam_shortcut  # noqa: E402  (scripts/)
 DATA_DIR = Path(os.environ.get('GOW3_DATA_DIR', PORT_DIR))
 CONFIG_DIR = (Path(os.environ.get('APPDATA', Path.home())) if WINDOWS else
-              Path(os.environ.get('XDG_CONFIG_HOME') or Path.home() / '.config')) / 'gow3-launcher'
+              Path(os.environ.get('XDG_CONFIG_HOME') or Path.home() / '.config')) / 'gow3-nvidia-launcher'
 CONFIG_FILE = CONFIG_DIR / 'settings.json'
 MOD_PRESETS = DATA_DIR / 'mods_presets.json'
 APP_NAME = 'God of War III'
@@ -49,12 +49,12 @@ NO_WINDOW = getattr(subprocess, 'CREATE_NO_WINDOW', 0)
 NEW_GROUP = {} if WINDOWS else {'start_new_session': True}
 UI_FONT, MONO_FONT, SERIF_FONT = 'Segoe UI', 'Consolas', 'Georgia'
 # This build; GitHub release tags are windows-v<VERSION>.
-VERSION = '2.1.7'
-RELEASES_API = 'https://api.github.com/repos/FelipePrado0/gow3_pc/releases/latest'
-RELEASES_PAGE = 'https://github.com/FelipePrado0/gow3_pc/releases/latest'
+VERSION = '2.1.7-nvidia-preview.1'
+RELEASES_API = 'https://github.com/DestroxIam/gow3_pc-nvidia/releases'
+RELEASES_PAGE = 'https://github.com/DestroxIam/gow3_pc-nvidia/releases'
 UPDATE_DIR = Path(tempfile.gettempdir()) / 'gow3-update'
 # Never copied over an installation by an update (the package does not hold them either).
-USER_FILES = ('user', 'out', 'mods', 'gow3.ini', 'mods.json', 'mods_presets.json', 'patches.json', 'last_run.log')
+USER_FILES = ('Game', 'user', 'out', 'mods', 'gow3.ini', 'mods.json', 'mods_presets.json', 'patches.json', 'last_run.log')
 # The God of War face for titles, next to gow3.ico; main() registers it for this process only.
 FONT_FILE = PORT_DIR / 'launcher' / 'gowfont.ttf'
 FR_PRIVATE = 0x10
@@ -138,6 +138,11 @@ def list_gpus():
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import button_icons  # noqa: E402
 import gow3_lang  # noqa: E402
+# Frozen language helpers insert _internal; restore the installed source priority.
+sys.path.insert(0, str(PORT_DIR / "scripts"))
+sys.path.insert(0, str(PORT_DIR / "launcher"))
+import gow3_dlss_control
+import game_layout
 
 LANG = 'en'
 FONT_LOADED = False  # set by main() for the window; the command-line roles never need the font
@@ -249,7 +254,7 @@ INI_DEFAULTS = {'upscaler': 'fsr4', 'preset': '1', 'sharpen': '1', 'sharpness': 
                 'rcas_strength': '75', 'frames_queued': '1', 'cheat_very_hard': '0', 'cheat_double_jumps': '0'}
 DISPLAY_MODES = [('windowed', ('Windowed',)), ('borderless', ('Borderless',)), ('fullscreen', ('Fullscreen',))]
 FPS_LIMITS = [('30', ('30',)), ('60', ('60',)), ('120', ('120',)), ('240', ('240',)), ('0', ('Unlimited',))]
-APP_DEFAULTS = {'ui_language': 'en', 'game_dir': os.environ.get('GOW3_GAME_DIR', str(PORT_DIR.parent / 'CUSA01623') if WINDOWS else ''), 'update_dir': '', 'experimental_upscaler': False,
+APP_DEFAULTS = {'ui_language': 'en', 'game_dir': os.environ.get('GOW3_GAME_DIR', str(game_layout.find_game(PORT_DIR) or PORT_DIR/'Game')), 'update_dir': '', 'experimental_upscaler': False,
                 'video_backend': 'auto', 'gamemode': False, 'mangohud': False, 'desktop_integration': True, 'user_dir': '',
                 'mods_dir': '', 'mods_enabled': True, 'patches_dir': '', 'language': '1',
                 'player_name': '', 'hdr': False, 'draw_pipe': '', 'readbacks': '', 'stream_memory': 'cached',
@@ -312,8 +317,7 @@ def control_map(controls, kind):
     return ','.join(f'{button}={chosen[button].strip()}' for button, _key, _pad in CONTROLS
                     if button in chosen and not set(chosen[button]) & set(',='))
 
-UPSCALERS = [('dlss', ('DLSS (NVIDIA GeForce RTX)',)),
-             ('fsr4', ('FSR 4 (best quality)', 'FSR 4 (лучшее качество)')),
+UPSCALERS = [('fsr4', ('FSR 4 (best quality)', 'FSR 4 (лучшее качество)')),
              ('fsr411', ('FSR 4.1.1 (needs fsr4_411 assets)', 'FSR 4.1.1 (нужны ассеты fsr4_411)')),
              ('fsr3', ('FSR 3.1 (every GPU)', 'FSR 3.1 (любая видеокарта)')),
              ('taa', ('TAA (native resolution anti-aliasing)', 'TAA (нативное сглаживание)')),
@@ -375,6 +379,8 @@ def load_json(path, default):
 def ini_path():
     return Path(os.environ.get('GOW3_CONFIG', DATA_DIR / 'gow3.ini'))
 
+
+APP_DEFAULTS.update(gow3_dlss_control.DEFAULTS)
 
 def load_ini():
     values, lines = dict(INI_DEFAULTS), []
@@ -561,7 +567,7 @@ def game_environment(s):
             env[name] = value
     env['PYTHONUNBUFFERED'] = '1'
     env['PYTHONIOENCODING'] = 'utf-8'
-    return env
+    return gow3_dlss_control.configure_environment(env, s, PORT_DIR)
 
 
 # ---------------------------------------------------------------------------------------------
@@ -579,8 +585,11 @@ class Launcher:
     def __init__(self, root, tk, ttk, filedialog, messagebox):
         self.tk, self.ttk, self.filedialog, self.messagebox = tk, ttk, filedialog, messagebox
         self.root = root
-        self.app = {**APP_DEFAULTS, **load_json(CONFIG_FILE, {})}
+        saved = game_layout.resolve_settings(load_json(CONFIG_FILE, {}), PORT_DIR)
+        defaults = gow3_dlss_control.recommended(gow3_dlss_control.gpu_name(str(PORT_DIR), str(saved.get('gpu_id',''))))
+        self.app = {**APP_DEFAULTS, **defaults, **saved}
         self.ini, self.ini_lines = load_ini()
+        if self.ini.get('upscaler') == 'dlss': self.ini['upscaler'] = 'off'
         self.vars = {}
         self.process = self.job = None
         self.downloading = False
@@ -867,7 +876,7 @@ class Launcher:
         self.side_title.pack(anchor='w', padx=22, pady=(24, 22))
         self.side = side
         self.nav, self.current_page = {}, None
-        for name, title in (('home', _('Home')), ('display', _('Display')),
+        for name, title in (('home', _('Home')), ('display', _('Display')), ('nvidia', 'NVIDIA'),
                             ('graphics', _('Graphics (experimental)', 'Графика (эксп.)')),
                             ('performance', _('Performance')),
                             ('game', _('Game', 'Игра')), ('patches', _('Patches', 'Патчи')),
@@ -901,6 +910,7 @@ class Launcher:
 
         self.pages = {}
         self.build_home()
+        self.build_nvidia()
         self.build_graphics()
         self.build_display()
         self.build_performance()
@@ -1000,6 +1010,159 @@ class Launcher:
         except (ImportError, OSError):
             factor = max(1, round(self.banner_image.width() / max(width, 1)))
             return self.banner_image.subsample(factor) if factor > 1 else self.banner_image
+
+    def nvidia_slider(self, parent, key, title, maximum=100, hint=None):
+        holder = self.ttk.Frame(parent)
+        var = self.var(key, 'app')
+        slider = self.tk.Scale(holder, from_=0, to=maximum, orient='horizontal', variable=var,
+            showvalue=False, length=self.px(260), width=self.px(12), sliderlength=self.px(18),
+            bg=ACCENT, troughcolor=CARD, activebackground=ACCENT_HI, highlightthickness=0, bd=0, sliderrelief='flat')
+        slider.pack(side='left')
+        number = self.ttk.Label(holder, width=5)
+        number.pack(side='left', padx=10)
+        def show(*_args):
+            try: number.configure(text=f'{round(float(var.get()))}%')
+            except (ValueError, self.tk.TclError): pass
+        var.trace_add('write', show)
+        show()
+        self.row(parent, title, holder, hint, restart=True)
+        return slider
+
+    def build_nvidia(self):
+        f = self.scrolled_page('nvidia', 'NVIDIA', 'DLSS, DLAA, Neural Rendering e geração de quadros em uma só guia.')
+        name = gow3_dlss_control.gpu_name(str(PORT_DIR), str(self.app.get('gpu_id', '')))
+        self.nvidia_hardware = gow3_dlss_control.hardware(name)
+        self.nvidia_gpu_label = self.ttk.Label(f, text=name, foreground=TEXT)
+        self.nvidia_gpu_label.grid(row=self.next_row(f), column=0, columnspan=2, sticky='w', pady=(0,8))
+        self.section(f, 'DLSS / DLAA', top=4)
+        self.row(f,'Integração',self.choice(f,'nvidia_pipeline','app',[
+            ('renderer',('Nativa · resolução interna automática',)),
+            ('capture',('Compatibilidade · processamento externo',))],width=42),
+            'Nativa: o preset determina o tamanho da cena e o DLSS reconstrói para a resolução final. '
+            'Compatibilidade mantém Neural Rendering e geração de quadros; processa a imagem já desenhada.',restart=True)
+        self.row(f, 'Tratamento da imagem', self.choice(f, 'nvidia_mode', 'app', [
+            ('off', ('Desligado · usar opções do Display / FSR',)),
+            ('dlaa', ('DLAA · resolução nativa',)), ('dlss', ('DLSS · reconstrução da imagem',))], width=42),
+            'DLAA trabalha na resolução da imagem final. DLSS reconstrói a partir de uma entrada menor.', restart=True)
+        quality_row = self.next_row(f)
+        self.nvidia_dlss_quality = self.row(f, 'Qualidade do DLSS', self.choice(f, 'nvidia_quality', 'app', [
+            ('ultra_quality', ('Ultra Qualidade',)), ('quality', ('Qualidade',)), ('balanced', ('Equilibrado',)),
+            ('performance', ('Desempenho',)), ('ultra_performance', ('Ultra Desempenho',))]), restart=True)
+        self.nvidia_quality_widgets = tuple(f.grid_slaves(row=quality_row))
+        self.nvidia_output_choice=self.row(f,'Resolução final',self.choice(f,'nvidia_output_res','app',[
+            ('1280x720',('720p · 1280 × 720',)),('1920x1080',('1080p · 1920 × 1080',)),
+            ('2560x1440',('1440p · 2560 × 1440',)),('3840x2160',('4K · 3840 × 2160',))],width=28),
+            'O preset calcula a resolução interna automaticamente. DLAA usa o tamanho final sem upscale.',restart=True)
+        self.nvidia_image_status = self.ttk.Label(f, text='', foreground=ACCENT_HI, wraplength=self.px(680))
+        self.nvidia_image_status.grid(row=self.next_row(f), column=0, columnspan=2, sticky='w', pady=(8,0))
+        self.note(f, 'Na integração nativa, DLSS e DLAA atuam no renderizador. A cena é desenhada na resolução interna calculada e reconstruída '
+                     'para a resolução final. A escolha manual em Desempenho vale quando esses modos estão desligados. '
+                     'A resolução física da tela permanece a do monitor.', top=6)
+        self.section(f, 'DLSS5 · Neural Rendering')
+        self.nvidia_nr_effective=self.tk.BooleanVar(value=False)
+        self.nvidia_nr_switch=self.check(f, 'dlss5_enabled', 'app', 'Ativar Neural Rendering',
+            'Disponível na integração Compatibilidade. Suspenso quando DLSS / DLAA usam o renderizador nativo.',
+            var=self.nvidia_nr_effective,restart=True)
+        self.nvidia_nr_switch.configure(command=lambda:self.var('dlss5_enabled','app').set(self.nvidia_nr_effective.get()))
+        self.nvidia_nr_widgets = []
+        self.nvidia_nr_widgets.append(self.row(f, 'Preset visual', self.choice(f, 'nvidia_nr_style', 'app', [
+            ('standard', ('Padrão',)), ('natural', ('Natural',)), ('cinematic', ('Cinematográfico',))]), restart=True))
+        self.nvidia_nr_widgets.append(self.row(f, 'Passadas do modelo', self.choice(f, 'nvidia_nr_passes', 'app', [
+            ('1', ('1 · recomendado',)), ('2', ('2',)), ('3', ('3',))]),
+            'Mais passadas aumentam o custo e podem alterar mais a imagem.', restart=True))
+        self.nvidia_nr_widgets.append(self.row(f, 'Resolução do modelo', self.choice(f, 'dlss5_quality', 'app', [
+            ('light', ('Leve · 33%',)), ('balanced', ('Equilibrada · 50%',)),
+            ('high', ('Alta · 67%',)), ('native', ('Nativa · 100%',))]), restart=True))
+        self.nvidia_nr_widgets.append(self.nvidia_slider(f, 'nvidia_nr_intensity', 'Intensidade do modelo', 200))
+        self.nvidia_nr_widgets.append(self.nvidia_slider(f, 'dlss5_strength', 'Mistura de detalhes',
+            hint='0% preserva os detalhes originais; 100% aplica toda a transferência neural.'))
+        self.nvidia_nr_widgets.append(self.nvidia_slider(f, 'nvidia_nr_colour', 'Mistura de cores'))
+        self.section(f, 'Geração de quadros')
+        self.nvidia_fg_provider_choice=self.row(f, 'Tecnologia', self.choice(f, 'nvidia_fg_provider', 'app', [
+            ('dlssg', ('NVIDIA · DLSS Frame Generation',)), ('xefg', ('XeFG · alternativa experimental',))], width=42), restart=True)
+        self.nvidia_fg_choice=self.row(f, 'Multi Frame Generation', self.choice(f, 'dlssg_mode', 'app',
+            [('off', ('Desligada',))] + [(f'{n}x', (f'{n}×',)) for n in range(2,7)]),
+            '2× = um quadro renderizado + um gerado; 6× = um renderizado + cinco gerados. '
+            'O FPS do motor continua separado. XeFG neste perfil usa apenas 2×.', restart=True)
+        self.check(f, 'nvidia_fps_overlay', 'app', 'Mostrar FPS com geração de quadros',
+            'No canto esquerdo: FPS estimado com geração / FPS base. O contador Native à direita mostra só os quadros do motor. '
+            'O painel Home pode suspender a geração enquanto está aberto.', restart=True)
+        self.nvidia_compatibility = self.ttk.Label(f, text='', style='Muted.TLabel', wraplength=self.px(680), justify='left')
+        self.nvidia_compatibility.grid(row=self.next_row(f), column=0, columnspan=2, sticky='w', pady=(8,0))
+        self.section(f, 'Compatibilidade experimental')
+        self.nvidia_ada_switch = self.check(f, 'nvidia_ada_mfg', 'app', 'Testar MFG acima de 2× na RTX 40',
+            'Extensão experimental do mod. Ainda sem validação em uma RTX 40.', restart=True)
+        self.nvidia_older_switch = self.check(f, 'nvidia_older_nr', 'app', 'Testar Neural Rendering nas RTX 30/40',
+            'O modelo instalado foi validado apenas na RTX 5070. Marcar esta opção não garante compatibilidade.', restart=True)
+        self.section(f, 'Aplicar e jogar')
+        holder = self.ttk.Frame(f)
+        holder.grid(row=self.next_row(f), column=0, columnspan=2, sticky='w', pady=(10,0))
+        self.ttk.Button(holder, text='Salvar configurações', command=self.save_nvidia).pack(side='left')
+        self.ttk.Button(holder, text='Restaurar recomendado', command=self.reset_nvidia).pack(side='left', padx=8)
+        self.nvidia_saved = self.ttk.Label(f, text='', foreground=ACCENT_HI)
+        self.nvidia_saved.grid(row=self.next_row(f), column=0, columnspan=2, sticky='w', pady=(10,0))
+        self.note(f, 'Salve e clique em JOGAR. Mudanças durante uma partida entram na próxima abertura. '
+                     'Home abre os ajustes avançados do mod; F6 compara Neural Rendering ligado / desligado. '
+                     'A integração é experimental e pode produzir rastros em movimento.', top=8)
+        for key in ('nvidia_mode','nvidia_quality','nvidia_output_res','nvidia_pipeline','dlss5_enabled','gpu_id'):
+            self.var(key, 'app').trace_add('write', self.refresh_nvidia)
+        self.refresh_nvidia()
+
+    def refresh_nvidia(self, *_args):
+        name = gow3_dlss_control.gpu_name(str(PORT_DIR), self.var('gpu_id','app').get())
+        h = self.nvidia_hardware = gow3_dlss_control.hardware(name)
+        self.nvidia_gpu_label.configure(text=name)
+        mode = self.var('nvidia_mode','app').get()
+        native=self.var('nvidia_pipeline','app').get()=='renderer' and mode!='off'
+        self.nvidia_dlss_quality.configure(state='readonly' if mode=='dlss' else 'disabled')
+        for widget in self.nvidia_quality_widgets:
+            if mode=='dlss': widget.grid()
+            else: widget.grid_remove()
+        self.nvidia_image_status.configure(text={
+            'dlaa':'DLAA ativo · DLSS de reconstrução desligado.',
+            'dlss':'DLSS ativo · DLAA desligado.',
+            'off':'DLSS e DLAA desligados.'}.get(mode,''))
+        if native:
+            dims=gow3_dlss_control.renderer_dimensions({k:self.var(k,'app').get() for k in gow3_dlss_control.DEFAULTS})
+            self.nvidia_image_status.configure(text=('DLAA ativo · DLSS desligado · ' if mode=='dlaa' else 'DLSS ativo · DLAA desligado · ')+
+                f'{dims["input"][0]} × {dims["input"][1]} interno → {dims["output"][0]} × {dims["output"][1]} final')
+        self.nvidia_output_choice.configure(state='readonly' if native else 'disabled')
+        nr = self.var('dlss5_enabled','app').get() and not native
+        self.nvidia_nr_effective.set(bool(nr))
+        self.nvidia_nr_switch.configure(state='disabled' if native else 'normal')
+        self.nvidia_fg_provider_choice.configure(state='readonly')
+        self.nvidia_fg_choice.configure(state='readonly')
+        for widget in self.nvidia_nr_widgets:
+            widget.configure(state=('readonly' if isinstance(widget,self.ttk.Combobox) else 'normal') if nr else 'disabled')
+        self.nvidia_ada_switch.configure(state='normal' if h['generation']==40 else 'disabled')
+        self.nvidia_older_switch.configure(state='normal' if h['rtx'] and h['generation']<50 else 'disabled')
+        text = 'DLSS / DLAA disponíveis nas GeForce RTX. '
+        if h['native_mfg']: text += 'RTX 50: NVIDIA 2×–6×. Neste computador, o SDK informou até cinco quadros gerados.'
+        elif h['native_fg']: text += 'RTX 40: NVIDIA 2×; acima disso, somente com MFG experimental. Neural Rendering ainda não validado.'
+        elif h['rtx']: text += 'RTX 30: geração NVIDIA nativa indisponível; alternativa XeFG 2× experimental. Neural Rendering ainda não validado.'
+        else: text = 'Use o FSR nas opções do Display / Graphics. Recursos NVIDIA exigem uma GeForce RTX.'
+        self.nvidia_compatibility.configure(text=text)
+        if native:
+            self.nvidia_compatibility.configure(text='Neste caminho, geração de quadros 2× foi confirmada. Neural Rendering fica suspenso: '
+                'a combinação com o novo renderizador apresentou falha de interoperação; use Compatibilidade para esse efeito. '
+                'Os valores salvos são preservados para alternar de volta.')
+        if hasattr(self,'status') and hasattr(self,'game_patch_title'): self.refresh_status()
+
+    def save_nvidia(self):
+        try:
+            candidate = dict(self.app)
+            candidate.update({k:self.var(k,'app').get() for k in gow3_dlss_control.DEFAULTS})
+            candidate['gpu_id'] = self.var('gpu_id','app').get()
+            gow3_dlss_control.validate(candidate, PORT_DIR)
+            self.collect()
+            self.nvidia_saved.configure(text='Configurações salvas. Serão usadas na próxima abertura.')
+        except (OSError, ValueError) as error:
+            self.messagebox.showerror('NVIDIA', str(error))
+
+    def reset_nvidia(self):
+        name = gow3_dlss_control.gpu_name(str(PORT_DIR), self.var('gpu_id','app').get())
+        for key, value in gow3_dlss_control.recommended(name).items(): self.var(key,'app').set(value)
+        self.save_nvidia()
 
     def build_graphics(self):
         """Temporal upscalers: not calibrated for this game yet, so run.py turns them off unless the
@@ -1481,6 +1644,9 @@ class Launcher:
         title_id, _profile = game_profile_of(self.meta_dir())
         names = self.app.get('game_patches', {}).get(title_id) or []
         resolution = dict((v, t[0]) for v, t in RESOLUTION_CHOICES).get(self.var('render_resolution', 'ini').get(), '?')
+        if self.var('nvidia_pipeline','app').get()=='renderer' and self.var('nvidia_mode','app').get()!='off':
+            dims=gow3_dlss_control.renderer_dimensions({k:self.var(k,'app').get() for k in gow3_dlss_control.DEFAULTS})
+            resolution=f"{dims['input'][0]}×{dims['input'][1]} → {dims['output'][0]}×{dims['output'][1]}"
         from patches import game_patchable, patch_status
         if not game_patchable(self.meta_dir()):
             return _('{} · 60 FPS engine · no patches for this game').format(resolution)
@@ -1672,7 +1838,18 @@ class Launcher:
 
     # ---- game process ------------------------------------------------------------------------
     def play(self):
+        if not self.process and gow3_dlss_control.running_game(PORT_DIR):
+            self.messagebox.showinfo(APP_NAME, 'Feche a partida atual antes de abrir outra ou aplicar as novas opções.')
+            return
         if self.process:
+            return
+        try:
+            candidate = dict(self.app)
+            candidate.update({k:self.var(k,'app').get() for k in gow3_dlss_control.DEFAULTS})
+            candidate['gpu_id'] = self.var('gpu_id','app').get()
+            gow3_dlss_control.validate(candidate,PORT_DIR)
+        except ValueError as error:
+            self.messagebox.showerror('NVIDIA',str(error))
             return
         self.collect()
         if not game_info(self.app['game_dir']):
@@ -1692,7 +1869,7 @@ class Launcher:
             self.process = subprocess.Popen(run_command(), cwd=PORT_DIR, env=game_environment(self.app),
                                             stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
                                             stderr=subprocess.STDOUT, creationflags=NO_WINDOW, **NEW_GROUP)
-        except OSError as error:
+        except (OSError, ValueError) as error:
             self.append(_('Could not start: {}', 'Не удалось запустить: {}').format(error) + '\n')
             self.process = None
             return
@@ -1770,22 +1947,8 @@ class Launcher:
 
     # ---- updates -------------------------------------------------------------------------------
     def check_update(self, manual=False):
-        """Helper thread: asks GitHub for the newest release and offers it when it is newer."""
-        try:
-            version, url, page = latest_release()
-        except (OSError, ValueError, KeyError) as failure:
-            if manual:
-                self.ui_calls.put(lambda error=failure: self.messagebox.showerror(
-                    APP_NAME, _('Could not check for updates: {}', 'Не удалось проверить обновления: {}').format(error)))
-            return
-
-        def show():
-            if version_tuple(version) > version_tuple(VERSION):
-                self.offer_update(version, url, page)
-            elif manual:
-                self.messagebox.showinfo(APP_NAME, _('You have the latest version ({}).',
-                                                         'У вас последняя версия ({}).').format(VERSION))
-        self.ui_calls.put(show)
+        # This preview uses manual fork releases so upstream updates cannot replace its UI.
+        if manual: self.open_url(RELEASES_PAGE) if hasattr(self,'open_url') else open_url(RELEASES_PAGE)
 
     def offer_update(self, version, url, page):
         if self.update_box:
@@ -2002,6 +2165,8 @@ def play_without_window(settings):
     """--play: the game with the saved settings (shortcuts, Steam). Output goes to the console
     when there is one and to <saves folder>/last_run.log."""
     attach_stdio()
+    if gow3_dlss_control.running_game(PORT_DIR):
+        return 1
     log_dir = Path(settings.get('user_dir') or DATA_DIR / 'user')
     log_dir.mkdir(parents=True, exist_ok=True)
     with open(log_dir / 'last_run.log', 'w', encoding='utf-8', buffering=1) as log:
@@ -2066,7 +2231,8 @@ def main():
     args = sys.argv[1:]
     if args and args[0] in ('--run', '--script'):
         sys.exit(run_role(args))
-    settings = {**APP_DEFAULTS, **load_json(CONFIG_FILE, {})}
+    saved = game_layout.resolve_settings(load_json(CONFIG_FILE, {}), PORT_DIR)
+    settings = {**APP_DEFAULTS, **gow3_dlss_control.recommended(gow3_dlss_control.gpu_name(str(PORT_DIR),str(saved.get('gpu_id','')))), **saved}
     LANG = settings.get('ui_language') or windows_language()
     if not WINDOWS:
         integrate_desktop(settings.get('desktop_integration', True), os.environ.get('APPIMAGE'),
@@ -2091,6 +2257,9 @@ def main():
     Launcher(root, tk, ttk, filedialog, messagebox)
     root.mainloop()
 
+
+from gow3_redesign import apply as apply_redesign
+Launcher = apply_redesign(Launcher, globals())
 
 if __name__ == '__main__':
     main()

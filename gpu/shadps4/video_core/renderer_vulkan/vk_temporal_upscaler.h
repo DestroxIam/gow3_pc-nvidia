@@ -66,6 +66,7 @@ public:
 
     /// Start of a frame in the command stream (display pass).
     bool OnFrameStart();
+    void BeforeFrameDisplay();
     bool RasterScaling() const;
     /// gow3: LOD bias for scene materials, log2(render / output) while a reduced scene is
     /// upscaled (0 at native size, for TAA and without an upscaler).
@@ -74,7 +75,8 @@ public:
     /// draw's render state (Rasterizer::BeginRendering).
     [[nodiscard]] u64 RedirectState() const noexcept {
         return u64(ui_phase) | u64(display_redirect) << 1 | u64(done_this_frame) << 2 |
-               u64(ui_color.index) << 8 | u64(ui_depth.index) << 36;
+               u64(ui_color.index) << 8 | u64(ui_depth.index) << 36 |
+               u64(native_display_copy) << 3 | (native_display_frame << 44);
     }
 
 
@@ -217,6 +219,8 @@ private:
     VideoCore::ImageId ui_color{}, ui_depth{};
     bool ui_phase = false;         ///< from the upscale to the next display pass
     bool display_redirect = false; ///< the display pass of an upscaled frame
+    bool native_display_copy = false;
+    u64 native_display_frame = 0;
     bool ui_read_barrier = false;
     VideoCore::UniqueImage ui_image;
     VideoCore::UniqueImage ui_depth_image;
@@ -243,6 +247,7 @@ private:
         vk::Format format{};
         u32 width = 0, height = 0;
         bool valid = false;
+        u64 native_frame = 0;
     };
     std::mutex display_mutex;
     std::unordered_map<VAddr, DisplayImage> displays;

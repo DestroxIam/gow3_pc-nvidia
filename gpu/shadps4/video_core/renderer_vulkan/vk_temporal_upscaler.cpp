@@ -524,7 +524,7 @@ bool TemporalUpscaler::EnsureResources(u32 w, u32 h, u32 ow, u32 oh, bool hdr) {
         return true;
     }
     if (use_fsr4) {
-        std::printf("Upscaler: FSR 4 inputs %ux%u -> %ux%u\n", w, h, ow, oh);
+        std::printf("Upscaler: %s inputs %ux%u -> %ux%u\n", UseDlss()?"DLSS":"FSR 4", w, h, ow, oh);
         return true;
     }
     FfxVkPortableMemoryUsage usage{};
@@ -1285,7 +1285,26 @@ float TemporalUpscaler::SceneMipBias() const {
 }
 
 bool TemporalUpscaler::Scaled() const {
-    return scaled_session || target_width != 1920 || target_height != 1080;
+    return Gow3Settings::Get().upscaler==Gow3Settings::UpscalerDlss ||
+           scaled_session || target_width != 1920 || target_height != 1080;
+}
+
+void TemporalUpscaler::BeforeFrameDisplay() {
+    static unsigned debug_frame=0;
+    if (++debug_frame%300==0) {
+        std::printf("GoW3 input state: preset %d active %d camera %d tracked %d depth %d color %d failed %d\n",
+                    Gow3Settings::RenderPreset(),int(Active()),int(camera_motion.Ready()),
+                    int(camera_motion.HasCameraThisFrame()),int(bool(camera_motion.Depth())),int(bool(ldr_target)),int(failed));
+        std::fflush(stdout);
+    }
+    // GoW3 completes the scene first, then copies it to the next display buffer and draws HUD.
+    // Consume scene color/depth/camera while the completed scene's state still exists.
+    if (UseDlss() && Active() && !failed && camera_motion.Ready() && ldr_target) {
+        done_this_frame=false;
+        ui_phase=false;
+        RunScaled();
+        if(ui_phase) ++native_display_frame;
+    }
 }
 
 void TemporalUpscaler::OnColorTarget(VideoCore::ImageId color) {
@@ -1294,7 +1313,8 @@ void TemporalUpscaler::OnColorTarget(VideoCore::ImageId color) {
     }
     const auto& image = texture_cache.GetImage(color);
     const auto& depth = texture_cache.GetImage(camera_motion.Depth());
-    if (image.info.pixel_format == vk::Format::eR8G8B8A8Unorm &&
+    if ((image.info.pixel_format == vk::Format::eR8G8B8A8Unorm ||
+         image.info.pixel_format == vk::Format::eR8G8B8A8Srgb) &&
         image.info.size.width == depth.info.size.width &&
         image.info.size.height == depth.info.size.height) {
         ldr_target = color;
@@ -1303,6 +1323,9 @@ void TemporalUpscaler::OnColorTarget(VideoCore::ImageId color) {
 
 void TemporalUpscaler::OnDraw(u64 vs_hash, VideoCore::ImageId color,
                               VideoCore::ImageId depth, bool native_viewport) {
+    native_display_copy=UseDlss() && color &&
+        FrameCapture::IsDisplayBuffer(texture_cache.GetImage(color).info.guest_address) &&
+        (u32(vs_hash)==0x56d7530b || u32(vs_hash)==0x3167b1ca);
     if (!Scaled() && vs_hash == ui_trigger_vs) done_this_frame = true;
     if (!Scaled() || !color) {
         return;
@@ -1318,6 +1341,15 @@ void TemporalUpscaler::OnDraw(u64 vs_hash, VideoCore::ImageId color,
         return;
     }
     const auto& image = texture_cache.GetImage(color);
+    if (UseDlss() && display_redirect && depth && FrameCapture::IsDisplayBuffer(image.info.guest_address)) {
+        if (depth!=ui_depth) {
+            EnsureUiResources(target_width,target_height,ui_format,
+                              texture_cache.GetImage(depth).info.pixel_format);
+            PrepareUiDepth(depth);
+            ui_depth=depth;
+        }
+        return;
+    }
     const bool movie = vs_hash == ui_trigger_vs || UiComposition::MovieShader(vs_hash) ||
                        (scaled_session && native_viewport);
     const bool ui_draw = movie &&
@@ -1396,8 +1428,12 @@ void TemporalUpscaler::EnsureUiResources(u32 w, u32 h, vk::Format color, vk::For
         }));
         ui_depth_format = depth;
     }
-    std::printf("UI: native composition %ux%u (scene %ux%u), independent of FSR history\n",
-                w, h, render_width, render_height);
+    static unsigned reported=0;
+    if(reported<12) {
+        ++reported;
+        std::printf("UI: native composition %ux%u (scene %ux%u), color %u depth %u, new %d/%d\n",
+                    w,h,render_width,render_height,u32(color),u32(depth),int(new_color),int(new_depth));
+    }
 }
 
 void TemporalUpscaler::PrepareUiDepth(VideoCore::ImageId depth_id) {
@@ -1813,6 +1849,8 @@ bool TemporalUpscaler::RedirectColor(VideoCore::ImageId color,
         const auto device = instance.GetDevice();
         scheduler.Finish();
         display.views.clear();
+        display.native_frame=0;
+        display.valid=false;
         std::printf("Display: host buffer %ux%u (live)\n", ui_width, ui_height);
         display.format = image.info.pixel_format;
         display.width = ui_width;
@@ -1828,7 +1866,7 @@ bool TemporalUpscaler::RedirectColor(VideoCore::ImageId color,
             .samples = vk::SampleCountFlagBits::e1,
             .tiling = vk::ImageTiling::eOptimal,
             .usage = vk::ImageUsageFlagBits::eColorAttachment | vk::ImageUsageFlagBits::eSampled |
-                     vk::ImageUsageFlagBits::eTransferSrc,
+                     vk::ImageUsageFlagBits::eTransferSrc | vk::ImageUsageFlagBits::eTransferDst,
             .initialLayout = vk::ImageLayout::eUndefined,
         });
         display.views.clear();
@@ -1839,7 +1877,7 @@ bool TemporalUpscaler::RedirectColor(VideoCore::ImageId color,
         .srcAccessMask = vk::AccessFlagBits2::eNone,
         .dstStageMask = vk::PipelineStageFlagBits2::eColorAttachmentOutput,
         .dstAccessMask = vk::AccessFlagBits2::eColorAttachmentWrite,
-        .oldLayout = vk::ImageLayout::eUndefined,
+        .oldLayout = display.valid ? vk::ImageLayout::eGeneral : vk::ImageLayout::eUndefined,
         .newLayout = vk::ImageLayout::eGeneral,
         .image = vk::Image(display.image),
         .subresourceRange = {vk::ImageAspectFlagBits::eColor, 0, 1, 0, 1},
@@ -1848,13 +1886,49 @@ bool TemporalUpscaler::RedirectColor(VideoCore::ImageId color,
         cmd.pipelineBarrier2({.imageMemoryBarrierCount = 1, .pImageMemoryBarriers = &b});
     });
     display.valid = true;
+    if (UseDlss() && native_display_copy && native_display_frame) {
+        if(display.native_frame!=native_display_frame) {
+            const auto cmd=scheduler.CommandBuffer();
+            const std::array<vk::ImageMemoryBarrier2,2> barriers{{
+                {.srcStageMask=vk::PipelineStageFlagBits2::eAllCommands,
+                 .srcAccessMask=vk::AccessFlagBits2::eMemoryWrite,
+                 .dstStageMask=vk::PipelineStageFlagBits2::eBlit,
+                 .dstAccessMask=vk::AccessFlagBits2::eTransferRead,
+                 .oldLayout=vk::ImageLayout::eGeneral,.newLayout=vk::ImageLayout::eGeneral,
+                 .image=vk::Image(ui_image),.subresourceRange={vk::ImageAspectFlagBits::eColor,0,1,0,1}},
+                {.srcStageMask=vk::PipelineStageFlagBits2::eAllCommands,
+                 .srcAccessMask=vk::AccessFlagBits2::eMemoryWrite,
+                 .dstStageMask=vk::PipelineStageFlagBits2::eBlit,
+                 .dstAccessMask=vk::AccessFlagBits2::eTransferWrite,
+                 .oldLayout=vk::ImageLayout::eGeneral,.newLayout=vk::ImageLayout::eGeneral,
+                 .image=vk::Image(display.image),.subresourceRange={vk::ImageAspectFlagBits::eColor,0,1,0,1}}
+            }};
+            cmd.pipelineBarrier2({.imageMemoryBarrierCount=2,.pImageMemoryBarriers=barriers.data()});
+            const vk::ImageBlit region{
+                .srcSubresource={vk::ImageAspectFlagBits::eColor,0,0,1},
+                .srcOffsets=std::array{vk::Offset3D{},vk::Offset3D{s32(ui_width),s32(ui_height),1}},
+                .dstSubresource={vk::ImageAspectFlagBits::eColor,0,0,1},
+                .dstOffsets=std::array{vk::Offset3D{},vk::Offset3D{s32(display.width),s32(display.height),1}}};
+            cmd.blitImage(vk::Image(ui_image),vk::ImageLayout::eGeneral,vk::Image(display.image),
+                          vk::ImageLayout::eGeneral,region,vk::Filter::eNearest);
+            const vk::MemoryBarrier2 after{.srcStageMask=vk::PipelineStageFlagBits2::eBlit,
+                .srcAccessMask=vk::AccessFlagBits2::eTransferWrite,
+                .dstStageMask=vk::PipelineStageFlagBits2::eAllCommands,
+                .dstAccessMask=vk::AccessFlagBits2::eMemoryRead|vk::AccessFlagBits2::eMemoryWrite};
+            cmd.pipelineBarrier2({.memoryBarrierCount=1,.pMemoryBarriers=&after});
+            display.native_frame=native_display_frame;
+        }
+        // The guest's self-copy remains on its original buffer; the reconstructed base
+        // is already in the host display. Later HUD draws use this host display normally.
+        return false;
+    }
     target = {Mirror(vk::Image(display.image), display.views, view_info.format, {}),
               vk::ImageLayout::eGeneral, ui_width, ui_height};
     return true;
 }
 
 bool TemporalUpscaler::RedirectDepth(VideoCore::ImageId depth, Target& target) {
-    if (!ui_phase || depth != ui_depth) {
+    if ((!ui_phase && !(UseDlss() && display_redirect)) || depth != ui_depth) {
         return false;
     }
     target = {*ui_depth_view, vk::ImageLayout::eGeneral, ui_width, ui_height, true};
@@ -2016,6 +2090,14 @@ bool TemporalUpscaler::RecordDlss(vk::CommandBuffer cmdbuf, const Dlss::Resource
             .frame_ms = frame_ms,
             .sharpness = settings.sharpen ? std::min(settings.sharpness.load(), 1.0f) : 0.0f,
         });
+        if (ok) {
+            static unsigned evaluated=0;
+            if (evaluated<3 || evaluated%600==0)
+                std::printf("GoW3 native DLSS: scene %ux%u -> output %ux%u, evaluation %u, camera/depth/jitter native\n",
+                            w,h,ow,oh,evaluated);
+            std::fflush(stdout);
+            ++evaluated;
+        }
     }
     if (!ok) {
         std::printf("Upscaler: DLSS failed; falling back to FSR 3.1\n");

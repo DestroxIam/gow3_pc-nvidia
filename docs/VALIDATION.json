@@ -1,0 +1,53 @@
+{
+  "source_commit": "b907d8a9f2324ba5f514fbfe7de803e027c6ca26",
+  "source_repository": "https://github.com/FelipePrado0/gow3_pc",
+  "probe_sha256": "8dc03bfd7b2e9c813292c9864441abc50b5301b0b8c957f6762dcf3dda0cc595",
+  "renderer_patch_sha256": "bd88a82fd89d55f19f294bc0753a77c2bf811896519f3610b47b72d1e9fccbd2",
+  "profiles_test": "passed",
+  "projection_test": "passed",
+  "live_presets": [
+    {
+      "mode": "Ultra Desempenho",
+      "input": "1280x720",
+      "output": "3840x2160",
+      "evaluation": "confirmed"
+    },
+    {
+      "mode": "DLAA",
+      "input": "3840x2160",
+      "output": "3840x2160",
+      "evaluation": "confirmed"
+    },
+    {
+      "mode": "Ultra Qualidade",
+      "input": "2954x1662",
+      "output": "3840x2160",
+      "evaluation": "confirmed"
+    },
+    {
+      "mode": "Qualidade",
+      "input": "2560x1440",
+      "output": "3840x2160",
+      "evaluation": "confirmed"
+    },
+    {
+      "mode": "Equilibrado",
+      "input": "2258x1270",
+      "output": "3840x2160",
+      "evaluation": "confirmed"
+    },
+    {
+      "mode": "Desempenho",
+      "input": "1920x1080",
+      "output": "3840x2160",
+      "evaluation": "confirmed"
+    }
+  ],
+  "FG_native": "2x observed",
+  "NR_native": "suspended; device interop failed",
+  "physical_GPU": "RTX 5070",
+  "test_engine_fps_limit": 120,
+  "saved_engine_fps_limit": 240,
+  "benchmark_performed": false,
+  "motion": "native depth and camera-derived motion; full object coverage unverified"
+}

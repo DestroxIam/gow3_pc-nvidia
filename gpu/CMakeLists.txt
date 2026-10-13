@@ -2,6 +2,9 @@
 # drivers, adapted to the native_probe runtime through shims in shim/.
 cmake_minimum_required(VERSION 3.24)
 project(gow3gpu LANGUAGES C CXX)
+add_executable(gow3-camera-test EXCLUDE_FROM_ALL ../tests/test_gow3_camera.cpp)
+target_include_directories(gow3-camera-test PRIVATE shadps4)
+target_compile_options(gow3-camera-test PRIVATE -UNDEBUG)
 set(CMAKE_CXX_STANDARD 23)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)

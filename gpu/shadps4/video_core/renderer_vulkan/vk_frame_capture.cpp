@@ -210,7 +210,7 @@ void FrameCapture::AddDisplayBuffer(VAddr address) {
 }
 
 void FrameCapture::BeginPass(const VideoCore::ImageInfo* const* colors, u32 num_colors,
-                             const VideoCore::ImageInfo* depth) {
+                             const VideoCore::ImageInfo* depth, bool display_copy) {
     std::vector<Target> targets;
     bool display = false;
     {
@@ -223,7 +223,7 @@ void FrameCapture::BeginPass(const VideoCore::ImageInfo* const* colors, u32 num_
     }
     // Frame boundaries in the command stream: the pass that writes a display buffer as its only
     // target. gow3: God of War III also draws scene passes (two targets) into display buffers.
-    display = display && targets.size() == 1;
+    display = display && targets.size() == 1 && display_copy;
     const bool new_pass = !(pass_open && !entries.empty() && !entries.back().compute &&
                             entries.back().colors == targets);
     if (display && new_pass) {

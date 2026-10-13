@@ -1,0 +1,27 @@
+--- a/OptiScaler/native/VirtualUpscalerDriver.h
++++ b/OptiScaler/native/VirtualUpscalerDriver.h
+@@ -26,6 +26,7 @@
+ #include <memory>
+ #include <string>
+ 
++class OS_Dx12;
+ class IFeature_Dx12;
+ struct NVNGX_Parameters;
+ enum class Upscaler;
+@@ -66,6 +67,8 @@
+     {
+         uint32_t width = 0;
+         uint32_t height = 0;
++        uint32_t renderWidth = 0, renderHeight = 0;
++        int quality = 5;
+         DXGI_FORMAT format = DXGI_FORMAT_UNKNOWN; // typed and UAV-capable: the output's, and the input copy's
+         bool depthReversed = false;
+         bool hdr = false;
+@@ -103,6 +106,7 @@
+     bool _neutralReversed = false;
+     ID3D12DescriptorHeap* _rtvHeap = nullptr;
+ 
++    std::unique_ptr<OS_Dx12> _scaleColor, _scaleMotion, _scaleDepth;
+     uint64_t _evaluations = 0;
+     uint32_t _zeroSizeFrames = 0;
+     std::string _error;

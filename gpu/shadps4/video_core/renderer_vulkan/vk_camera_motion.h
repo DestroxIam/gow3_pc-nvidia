@@ -48,8 +48,9 @@ public:
 
     /// Both cameras and the scene depth of the current frame are known.
     [[nodiscard]] bool Ready() const noexcept {
-        return current.valid && previous.valid && depth_id;
+        return frame_has_camera && current.valid && previous.valid && depth_id;
     }
+    [[nodiscard]] bool HasCameraThisFrame() const noexcept { return frame_has_camera; }
     [[nodiscard]] VideoCore::ImageId Depth() const noexcept {
         return depth_id;
     }
@@ -70,7 +71,7 @@ public:
                       u32 width, u32 height);
 
     /// A bound constant buffer of 864 bytes: checks the scene constant signature.
-    void OnConstants(const float* data);
+    void OnConstants(const float* data, u32 bytes = 864);
 
     /// The G-buffer pass (5+ color targets): its depth is the scene depth.
     void OnGBufferPass(VideoCore::ImageId depth);

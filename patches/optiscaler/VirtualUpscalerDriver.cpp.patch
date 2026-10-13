@@ -1,0 +1,167 @@
+--- a/OptiScaler/native/VirtualUpscalerDriver.cpp
++++ b/OptiScaler/native/VirtualUpscalerDriver.cpp
+@@ -5,6 +5,9 @@
+ #include "DepthFinderCore.h"
+ 
+ #include <atomic>
++#include <cstdlib>
++#include <cmath>
++#include <shaders/output_scaling/OS_Dx12.h>
+ #include <NVNGX_Parameter.h>
+ #include <State.h>
+ #include <Config.h>
+@@ -177,15 +180,16 @@
+ 
+ bool VirtualUpscalerDriver::CreateFeature(ID3D12GraphicsCommandList* cmd, const Key& key, Upscaler backend)
+ {
+-    _params->Set(NVSDK_NGX_Parameter_Width, key.width);
+-    _params->Set(NVSDK_NGX_Parameter_Height, key.height);
++    _params->Set(NVSDK_NGX_Parameter_Width, key.renderWidth);
++    _params->Set(NVSDK_NGX_Parameter_Height, key.renderHeight);
+     _params->Set(NVSDK_NGX_Parameter_OutWidth, key.width);
+     _params->Set(NVSDK_NGX_Parameter_OutHeight, key.height);
+-    _params->Set(NVSDK_NGX_Parameter_PerfQualityValue, 1);
++    _params->Set(NVSDK_NGX_Parameter_PerfQualityValue, key.quality);
+ 
+     // Not jittered and not low-res: the guides are output-sized, unjittered motion. AutoExposure because there is no exposure
+     // texture to give: without both, FFXFeatureDx12::EvaluateInternal returns true having dispatched nothing.
+     unsigned int flags = NVSDK_NGX_DLSS_Feature_Flags_AutoExposure;
++    if (key.renderWidth != key.width) flags |= NVSDK_NGX_DLSS_Feature_Flags_MVLowRes;
+ 
+     if (key.depthReversed)
+         flags |= NVSDK_NGX_DLSS_Feature_Flags_DepthInverted;
+@@ -239,7 +243,8 @@
+     if (_feature != nullptr && !rebuild)
+     {
+         const bool flagsOnly = key.width == _featureKey.width && key.height == _featureKey.height &&
+-                               key.format == _featureKey.format && key.backend == _featureKey.backend;
++                               key.format == _featureKey.format && key.backend == _featureKey.backend &&
++                               key.renderWidth == _featureKey.renderWidth && key.quality == _featureKey.quality;
+ 
+         // Built before the game's depth came, the direction was a guess: the first real depth corrects it at once
+         if (!_settle.Now(_featureKey, key, flagsOnly, !_featureRealDepth && realDepth))
+@@ -409,6 +414,21 @@
+     key.hdr = frame.space == ColorSpace::ScRgb; // PQ is a perceptual encoding, as sRGB is: passed as it comes
+     key.backend = (int) WantedBackend();
+ 
++    // GoW3 local extension: real DLSS input sizes, with independent Neural Rendering.
++    double ratio = 1.0;
++    const char* mode = std::getenv("GOW3_NVIDIA_QUALITY");
++    key.quality = 5; // NVIDIA DLAA
++    if (mode && key.backend == (int)Upscaler::DLSS) {
++        const std::string name(mode);
++        if (name == "ultra_quality") { ratio = 1.3; key.quality = 4; }
++        else if (name == "quality") { ratio = 1.5; key.quality = 2; }
++        else if (name == "balanced") { ratio = 1.7; key.quality = 1; }
++        else if (name == "performance") { ratio = 2.0; key.quality = 0; }
++        else if (name == "ultra_performance") { ratio = 3.0; key.quality = 3; }
++    }
++    key.renderWidth = ratio == 1.0 ? key.width : std::max(16u, (uint32_t)std::ceil(key.width / ratio / 8.0) * 8u);
++    key.renderHeight = ratio == 1.0 ? key.height : std::max(16u, (uint32_t)std::ceil(key.height / ratio / 8.0) * 8u);
++
+     // No usable size yet (a swapchain still being made or resized; the FSR backend throws below a few pixels): wait for the next frame, build nothing.
+     if (key.width < 16 || key.height < 16)
+     {
+@@ -514,20 +534,55 @@
+         pictureNow = inColor;
+     }
+ 
++    ID3D12Resource* motion = frame.motion;
++    ID3D12Resource* nrDepth = frame.depth;
++    const bool scaledInput = key.renderWidth != key.width || key.renderHeight != key.height;
++    if (scaledInput) {
++        // Reuse the project's GPU resampler and resource lifetime management.
++        // The source remains intact; the backend sees actual smaller color, depth and motion textures.
++        if (!_scaleColor) {
++            _scaleColor = std::make_unique<OS_Dx12>("GoW3 DLSS color input", _device, false, Scaler::Bicubic);
++            _scaleMotion = std::make_unique<OS_Dx12>("GoW3 DLSS motion input", _device, false, Scaler::Bicubic);
++            _scaleDepth = std::make_unique<OS_Dx12>("GoW3 DLSS depth input", _device, false, Scaler::Bicubic);
++        }
++        auto resize = [&](OS_Dx12& scaler, ID3D12Resource* input, D3D12_RESOURCE_STATES state) -> ID3D12Resource* {
++            if (!scaler.CreateBufferResource(_device, input, key.renderWidth, key.renderHeight, kWrite)) return nullptr;
++            Transition(cmd, input, state, kRead);
++            scaler.SetBufferState(cmd, kWrite);
++            { ScopedSkipHeapCapture skip {}; if (!scaler.Dispatch(cmd, input, scaler.Buffer())) return nullptr; }
++            scaler.SetBufferState(cmd, kRead);
++            Transition(cmd, input, kRead, state);
++            return scaler.Buffer();
++        };
++        ID3D12Resource* smallColor = resize(*_scaleColor, color, inColor);
++        ID3D12Resource* smallMotion = resize(*_scaleMotion, motion, kRead);
++        ID3D12Resource* smallDepth = resize(*_scaleDepth, depth, kRead);
++        if (!smallColor || !smallMotion || !smallDepth) {
++            LOG_ERROR("GoW3 DLSS: failed to make scaled input resources");
++            return false;
++        }
++        // Existing code below tracks the source/copy's state; scaled resources already rest in shader-read.
++        color = smallColor;
++        motion = smallMotion;
++        depth = smallDepth;
++        nrDepth = frame.depth ? smallDepth : nullptr;
++    }
++    _params->Set(NVSDK_NGX_Parameter_DLSS_Render_Subrect_Dimensions_Width, key.renderWidth);
++    _params->Set(NVSDK_NGX_Parameter_DLSS_Render_Subrect_Dimensions_Height, key.renderHeight);
+     _params->Set(NVSDK_NGX_Parameter_Color, color);
+-    _params->Set(NVSDK_NGX_Parameter_Depth, frame.depth);
+-    _params->Set(NVSDK_NGX_Parameter_MotionVectors, frame.motion);
++    _params->Set(NVSDK_NGX_Parameter_Depth, nrDepth);
++    _params->Set(NVSDK_NGX_Parameter_MotionVectors, motion);
+     _params->Set(NVSDK_NGX_Parameter_Output, _output);
+     _params->Set(NVSDK_NGX_Parameter_Jitter_Offset_X, 0.0f);
+     _params->Set(NVSDK_NGX_Parameter_Jitter_Offset_Y, 0.0f);
+-    _params->Set(NVSDK_NGX_Parameter_MV_Scale_X, 1.0f);
+-    _params->Set(NVSDK_NGX_Parameter_MV_Scale_Y, 1.0f);
++    _params->Set(NVSDK_NGX_Parameter_MV_Scale_X, float(key.renderWidth) / float(key.width));
++    _params->Set(NVSDK_NGX_Parameter_MV_Scale_Y, float(key.renderHeight) / float(key.height));
+     _params->Set(NVSDK_NGX_Parameter_Reset, frame.reset ? 1u : 0u);
+     _params->Set(NVSDK_NGX_Parameter_Sharpness, 0.0f);
+     _params->Set(NVSDK_NGX_Parameter_DLSS_Pre_Exposure, 1.0f);
+ 
+     // From here the resources are where a game's would be at its call: in the states the backend takes them in.
+-    Transition(cmd, frame.motion, kRead, inMotion);
++    Transition(cmd, motion, kRead, inMotion);
+     Transition(cmd, depth, kRead, inDepth);
+     Transition(cmd, _output, kWrite, inOutput);
+ 
+@@ -536,7 +591,7 @@
+     DlssNr::EvaluateBeforeUpscale(cmd, _params);
+     _params->Set(NVSDK_NGX_Parameter_Depth, depth);
+ 
+-    Transition(cmd, frame.motion, inMotion, fgMotion);
++    Transition(cmd, motion, inMotion, fgMotion);
+     Transition(cmd, depth, inDepth, fgDepth);
+     Transition(cmd, _output, inOutput, fgOutput);
+ 
+@@ -560,7 +615,7 @@
+     UpscalerInputsDx12::UpscaleStart(cmd, _params, _feature.get());
+     UpscalerInputsDx12::UpscaleEnd(cmd, _params, _feature.get());
+ 
+-    Transition(cmd, frame.motion, fgMotion, inMotion);
++    Transition(cmd, motion, fgMotion, inMotion);
+     Transition(cmd, depth, fgDepth, inDepth);
+     Transition(cmd, _output, fgOutput, inOutput);
+ 
+@@ -578,7 +633,7 @@
+         }
+     }
+ 
+-    _params->Set(NVSDK_NGX_Parameter_Depth, frame.depth);
++    _params->Set(NVSDK_NGX_Parameter_Depth, nrDepth);
+ 
+     if (evaluated)
+         DlssNr::EvaluateAfterUpscale(cmd, _params);
+@@ -588,10 +643,13 @@
+                  _evaluations, evaluated, _backendName, key.width, key.height, (int) key.format,
+                  copyIn ? " (copied)" : "", frame.reset, _featureKey.depthReversed);
+ 
++    if (_evaluations < 8 || _evaluations % 300 == 0)
++        LOG_INFO("GoW3 DLSS preset: quality {}, input {}x{} -> output {}x{}, evaluated {}", key.quality,
++                 key.renderWidth, key.renderHeight, key.width, key.height, evaluated);
+     ++_evaluations;
+ 
+     // The backend hands its inputs back in the states it took them in.
+-    Transition(cmd, frame.motion, inMotion, kRead);
++    Transition(cmd, motion, inMotion, kRead);
+     Transition(cmd, depth, inDepth, kRead);
+ 
+     if (copyIn)

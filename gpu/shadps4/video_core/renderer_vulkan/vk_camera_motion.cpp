@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 #include "video_core/renderer_vulkan/vk_camera_motion.h"
+#include "video_core/renderer_vulkan/gow3_camera.h"
 
 #include <cmath>
 #include <cstdio>
@@ -218,9 +219,25 @@ void CameraMotion::RecordMotion(vk::CommandBuffer cmdbuf, vk::ImageView depth_vi
     cmdbuf.dispatch((width + 7) / 8, (height + 7) / 8, 1);
 }
 
-void CameraMotion::OnConstants(const float* data) {
+void CameraMotion::OnConstants(const float* data, u32 bytes) {
+    if (frame_has_camera) return;
+    if (auto camera = Gow3Camera::Decode(data, bytes, 16.f/9.f)) {
+        previous=current;
+        current.view=camera->view;
+        current.inv_view=camera->inverse;
+        current.proj=camera->projection;
+        current.valid=true;
+        frame_has_camera=true;
+        static bool reported=false;
+        if (!reported) {
+            reported=true;
+            std::printf("GoW3 camera: native view-projection tracked, near %.3f, projection %.3fx%.3f\n",
+                        Near(),current.proj[0],current.proj[1]);
+        }
+        return;
+    }
     // Scene constants: far plane 3000, 1/far, and the render size.
-    if (data[0] != 3000.0f || data[4] < 64.0f || data[5] < 64.0f ||
+    if (bytes < 864 || data[0] != 3000.0f || data[4] < 64.0f || data[5] < 64.0f ||
         std::abs(data[1] * data[0] - 1.0f) > 1e-3f) {
         return;
     }
@@ -242,6 +259,8 @@ void CameraMotion::OnConstants(const float* data) {
 
 void CameraMotion::OnGBufferPass(VideoCore::ImageId depth) {
     depth_id = depth;
+    const auto& image=texture_cache.GetImage(depth);
+    render_size={image.info.size.width,image.info.size.height};
 }
 
 void CameraMotion::OnDisplayPass(VideoCore::ImageId frame) {

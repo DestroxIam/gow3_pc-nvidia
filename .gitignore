@@ -23,3 +23,17 @@ perf.data
 mods.json
 patches.json
 !launcher/gow3.png
+
+# User-supplied game content and publication artifacts
+/Game/*
+!/Game/README.md
+!/Game/.gitkeep
+/release-stage/
+*.iso
+*.pkg
+*.prx
+*.sprx
+*.raw
+settings.json
+.env*
+!launcher/redesign-assets/**/*.png

@@ -37,7 +37,7 @@ public:
     static void Poll();
 
     static void BeginPass(const VideoCore::ImageInfo* const* colors, u32 num_colors,
-                          const VideoCore::ImageInfo* depth);
+                          const VideoCore::ImageInfo* depth, bool display_copy = true);
     static void Draw(u64 vs_hash, u64 ps_hash, u32 num_indices, u32 num_instances);
     static void Dispatch(u64 cs_hash, u32 x, u32 y, u32 z);
     static void Sampled(const VideoCore::ImageInfo& info, bool storage);

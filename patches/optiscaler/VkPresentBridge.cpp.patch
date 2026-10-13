@@ -1,0 +1,38 @@
+--- a/OptiScaler/native/VkPresentBridge.cpp
++++ b/OptiScaler/native/VkPresentBridge.cpp
+@@ -19,6 +19,8 @@
+ #include <menu/menu_overlay_vk.h>
+ #include <misc/IdentifyGpu.h>
+ #include <proxies/DXGI_Proxy.h>
++#include <proxies/Streamline_Proxy.h>
++#include <cstdlib>
+ #include <with_dx12/dx11_with_dx12_sync.h>
+ #include <with_dx12/with_dx12.h>
+ 
+@@ -158,7 +160,7 @@
+     if (config->DlssNrNativeFrameGenerationOnly.value_or_default() && !DxvkGame())
+         return true;
+ 
+-    return config->DlssNrEnabled.value_or_default() && config->DlssNrNativeMotion.value_or_default() &&
++    return config->DlssNrNativeMotion.value_or_default() &&
+            config->DlssNrNativeUpscaler.value_or_default();
+ }
+ 
+@@ -928,6 +930,17 @@
+         MenuOverlayDx::Present(output.Get(), sync, flags, nullptr, queue12, window, false);
+ 
+     const HRESULT hr = output->Present(sync, flags);
++    // Diagnostic only: ask the real SDK after presentation, not the configured multiplier.
++    static const bool gow3Diagnostics = std::getenv("GOW3_NVIDIA_DIAGNOSTICS") != nullptr;
++    static unsigned gow3Sample = 0;
++    if (gow3Diagnostics && ++gow3Sample % 300 == 0 &&
++        Config::Instance()->FGEnabled.value_or_default() && state.activeFgOutput == FGOutput::DLSSG &&
++        StreamlineProxy::DLSSGGetState() != nullptr) {
++        sl::DLSSGState actual {};
++        const auto answer = StreamlineProxy::DLSSGGetState()(sl::ViewportHandle(0), actual, nullptr);
++        LOG_INFO("GoW3 NVIDIA presented: SDK result {}, frames {}, max generated {}, status {}",
++                 (int)answer, actual.numFramesActuallyPresented, actual.numFramesToGenerateMax, (int)actual.status);
++    }
+     const bool presentFailed = FAILED(hr) && hr != DXGI_ERROR_WAS_STILL_DRAWING;
+     const bool deviceGone = presentFailed && device12 != nullptr && FAILED(device12->GetDeviceRemovedReason());
+ 

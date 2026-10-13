@@ -25,6 +25,8 @@ inline bool NativeViewport(float width, float height) {
 // Scaleform draws, including the first stencil/movie pass. A native-size viewport
 // alone also matches every fullscreen post pass when guest targets stay at 1080p.
 constexpr bool MovieShader(uint64_t hash) {
+    const auto gow3=uint32_t(hash);
+    if (gow3==0x299c282c || gow3==0xb4c8fcb8) return true;
     return hash == 0x34e8a281 || hash == 0x81d336ce || hash == 0x09957251 ||
            hash == 0x24042a9b || hash == 0xa400228b;
 }

@@ -4,6 +4,7 @@
 #include <xxhash.h>
 #include "video_core/renderer_vulkan/ui_composition.h"
 #include "gow3_toggles.h"
+#include "gow3_settings.h"
 #include "video_core/renderer_vulkan/vk_frame_capture.h"
 #include "common/debug.h"
 #include "core/debug_state.h"
@@ -264,7 +265,26 @@ void Rasterizer::PrepareRenderState(const GraphicsPipeline* pipeline) {
     }
     // gow3: the G-buffer pass (5+ color targets) holds the scene depth, and its constants the
     // main camera (shadow passes bind the same layout with the light's camera).
-    gbuffer_draw = camera_motion->Enabled() && std::popcount(key.mrt_mask) >= 5 && db_desc.first;
+    bool has_color=false;
+    for(unsigned cb=0;cb<cb_descs.size();++cb)
+        has_color|=bool((key.mrt_mask & (1u<<cb)) && cb_descs[cb].first);
+    const bool no_color = skip_cb_binding || !has_color;
+    const bool gow3_depth = db_desc.first && no_color &&
+        regs.depth_control.depth_write_enable && !regs.IsClipDisabled() &&
+        texture_cache.GetImage(db_desc.first).info.size.width==1920 &&
+        texture_cache.GetImage(db_desc.first).info.size.height==1080;
+    if (camera_motion->Enabled() && db_desc.first && regs.num_indices>6) {
+        static unsigned samples=0;
+        if (samples<15) {
+            const auto& di=texture_cache.GetImage(db_desc.first).info;
+            std::printf("GoW3 depth candidate: %ux%u, mrt %x, clip disabled %d, write %d, indices %u, scene %d\n",
+                        di.size.width,di.size.height,key.mrt_mask,int(regs.IsClipDisabled()),
+                        int(regs.depth_control.depth_write_enable),regs.num_indices,int(gow3_depth));
+            ++samples;
+        }
+    }
+    gbuffer_draw = camera_motion->Enabled() && db_desc.first &&
+                   (gow3_depth || std::popcount(key.mrt_mask) >= 5);
     if (gbuffer_draw) {
         camera_motion->OnGBufferPass(db_desc.first);
     }
@@ -956,9 +976,16 @@ void Rasterizer::DrawRecord(const GraphicsPipeline* pipeline, const PreparedDraw
     const auto& regs = Regs();
     // gow3: the pass copying a finished frame to a display buffer; the previous draw's
     // target is that frame.
-    if (camera_motion->Enabled() && regs.color_buffers[0] &&
-        FrameCapture::IsDisplayBuffer(regs.color_buffers[0].Address())) {
+    const u32 display_vs=u32(pipeline->GetStage(Shader::SwStage::Vertex).pgm_hash);
+    const bool gow3_copy=display_vs==0x56d7530b || display_vs==0x3167b1ca;
+    const bool display_copy = regs.color_buffers[0] &&
+        FrameCapture::IsDisplayBuffer(regs.color_buffers[0].Address()) &&
+        std::popcount(pipeline->GetGraphicsKey().mrt_mask & 0x7f)==1 && regs.num_indices<=6 &&
+        (Gow3Settings::Get().upscaler!=Gow3Settings::UpscalerDlss || gow3_copy) &&
+        !UiComposition::MovieShader(pipeline->GetStage(Shader::SwStage::Vertex).pgm_hash);
+    if (camera_motion->Enabled() && display_copy && !in_display_copy) {
         scene_started = false;
+        upscaler->BeforeFrameDisplay();
         camera_motion->OnDisplayPass(cb_descs[0].first);
         if (upscaler->OnFrameStart()) {
             object_motion->InvalidateHistory();
@@ -971,6 +998,7 @@ void Rasterizer::DrawRecord(const GraphicsPipeline* pipeline, const PreparedDraw
         scene_debug_frame = scene_debug && std::remove(scene_debug) == 0;
         scene_targets->debug = scene_debug_frame;
     }
+    in_display_copy=display_copy;
     bind_prepared = used_prepared;
     motion_draw = pipeline->GetGraphicsKey().motion_vectors;
     motion_geometry = 0;
@@ -2053,9 +2081,10 @@ void Rasterizer::BindBuffers(const Shader::Info& stage, const PreparedStage* pre
                                      reinterpret_cast<const void*>(ring->address), ring->size);
             }
             if (!desc.IsSpecial()) {
-                if (ring->size == 864 && gbuffer_draw &&
-                    memory->IsValidGpuMapping(ring->address, 0)) {
-                    camera_motion->OnConstants(reinterpret_cast<const float*>(ring->address));
+                if (ring->size >=128 && ring->size<=864 && gbuffer_draw && stage.sw_stage==Shader::SwStage::Vertex) {
+                    // The guest reuses its constant allocation while stage B records this
+                    // draw. Track the same immutable ring snapshot that the shader reads.
+                    camera_motion->OnConstants(reinterpret_cast<const float*>(constant_ring->Data(ring->offset)),ring->size);
                 }
                 push_data.AddOffset(binding.buffer, 0);
             }
@@ -2114,9 +2143,9 @@ void Rasterizer::BindBuffers(const Shader::Info& stage, const PreparedStage* pre
         } else {
             const auto vsharp =
                 prepared ? prepared->buffer_sharps[buffer_index] : desc.GetSharp(stage);
-            if (vsharp.GetSize() == 864 && gbuffer_draw &&
+            if (vsharp.GetSize() >=128 && vsharp.GetSize()<=864 && gbuffer_draw && stage.sw_stage==Shader::SwStage::Vertex &&
                 memory->IsValidGpuMapping(vsharp.base_address, 0)) {
-                camera_motion->OnConstants(reinterpret_cast<const float*>(vsharp.base_address));
+                camera_motion->OnConstants(reinterpret_cast<const float*>(vsharp.base_address),vsharp.GetSize());
             }
             // Object motion research: the vertex shader buffers of G-buffer draws.
             if (FrameCapture::Active() && gbuffer_draw && stage.sw_stage == Shader::SwStage::Vertex &&
@@ -2700,8 +2729,11 @@ RenderState Rasterizer::BeginRenderingFull(const GraphicsPipeline* pipeline) {
     std::pair<vk::ImageView, vk::ImageLayout> original_color{};
     const auto& regs = Regs();
     const auto& key = pipeline->GetGraphicsKey();
-    if (std::popcount(key.mrt_mask & 0x7f) >= 5 && db_desc.first &&
-        scene_targets->EligibleScene(texture_cache.GetImage(db_desc.first))) scene_started = true;
+    if (db_desc.first && texture_cache.GetImage(db_desc.first).info.size.width==1920 &&
+        texture_cache.GetImage(db_desc.first).info.size.height==1080 &&
+        (std::popcount(key.mrt_mask & 0x7f)>=5 ||
+         (camera_motion->HasCameraThisFrame() && db_desc.first==camera_motion->Depth() && regs.depth_control.depth_write_enable &&
+          !regs.IsClipDisabled()))) scene_started=true;
     // A proxy attachment cannot represent MSAA or a feedback loop that reads the
     // same image through the guest's native descriptor during this draw.
     bool reduced = scene_started && upscaler->RasterScaling() && key.num_samples == 1;
@@ -2996,7 +3028,9 @@ RenderState Rasterizer::BeginRenderingFull(const GraphicsPipeline* pipeline) {
         }
         const auto* depth =
             db_desc.first ? &texture_cache.GetImage(db_desc.first).info : nullptr;
-        FrameCapture::BeginPass(colors.data(), state.num_color_attachments, depth);
+        const bool display_copy = regs.num_indices<=6 &&
+            !UiComposition::MovieShader(pipeline->GetStage(Shader::SwStage::Vertex).pgm_hash);
+        FrameCapture::BeginPass(colors.data(), state.num_color_attachments, depth,display_copy);
     }
     // gow3: object motion vector attachment of G-buffer pipelines.
     if (key.motion_vectors) {
