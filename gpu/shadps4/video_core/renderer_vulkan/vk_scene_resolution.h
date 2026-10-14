@@ -38,8 +38,12 @@ public:
         vk::ImageView view;
         vk::ImageLayout layout;
         vk::ImageUsageFlags usage;
+        u32 width = 0, height = 0; ///< actual view's base-mip extent, including native fallback
+        vk::SampleCountFlagBits samples = vk::SampleCountFlagBits::e1;
     };
     Target Attachment(VideoCore::ImageId, const VideoCore::ImageViewInfo&);
+    /// Ineligible images/views stay native, without a copy or a change of sample count.
+    /// The caller must check eligibility before assuming proxy dimensions or single sampling.
     Target Read(VideoCore::ImageId, const VideoCore::ImageViewInfo&,
                 vk::PipelineStageFlags2 = vk::PipelineStageFlagBits2::eComputeShader,
                 vk::AccessFlags2 = vk::AccessFlagBits2::eShaderRead);
@@ -55,7 +59,7 @@ public:
     /// SampleProxy for a view obtained before (valid while Generation() is unchanged): the
     /// layout to sample it in.
     vk::ImageLayout PrepareSample(const VideoCore::Image& image, u32 level = 0);
-    /// Changes when proxies and their views are destroyed (SetSize).
+    /// Changes when proxies/views are retired (size or source backing changes).
     [[nodiscard]] u64 Generation() const noexcept {
         return generation;
     }
@@ -64,22 +68,43 @@ public:
         return !copying && tracked.contains(image_uid);
     }
     void ResolveAll();
+    /// Resample externally owned depth (e.g. UI), retaining the supplied layouts on return.
+    /// MS sources require matching destination samples; 1x sources may be replicated to MS.
+    /// Caller supplies valid tracked layouts/usage and the common depth/stencil format.
+    bool ResampleDepthTo(const Target& source, const Target& destination, vk::Format,
+                         bool stencil);
     bool debug = false; ///< GOW3_SCENE_DEBUG frame: print resolves and fills
 private:
+    enum class ViewUse { Sampled, Storage, Attachment };
+    struct CachedView {
+        VideoCore::ImageViewInfo info;
+        ViewUse use;
+        vk::UniqueImageView view;
+    };
     struct Entry {
         VideoCore::ImageId source{};
         u64 uid = 0;
         u32 level = 0; ///< mip level of the native image this proxy stands for
+        const VideoCore::Image::BackingImage* backing = nullptr;
+        vk::Image source_image{};
+        vk::ImageCreateInfo source_ci{};
+        vk::ImageAspectFlags aspect{};
         VideoCore::UniqueImage image;
-        std::vector<std::pair<VideoCore::ImageViewInfo, vk::UniqueImageView>> views;
+        std::vector<CachedView> views;
         vk::ImageLayout layout = vk::ImageLayout::eUndefined;
         SceneResolution::Coherence state;
     };
     static constexpr u64 Key(u64 uid, u32 level) {
         return uid << 4 | level;
     }
-    Entry& Get(VideoCore::ImageId, u32 level = 0);
-    vk::ImageView View(Entry&, const VideoCore::Image&, const VideoCore::ImageViewInfo&);
+    Entry* Get(VideoCore::ImageId, u32 level = 0);
+    bool Matches(const Entry&, const VideoCore::Image&) const;
+    void Invalidate(u64 uid);
+    void InvalidateStale(const VideoCore::Image&);
+    bool ViewEligible(const VideoCore::Image&, const VideoCore::ImageViewInfo&, ViewUse) const;
+    vk::ImageView View(Entry&, const VideoCore::Image&, const VideoCore::ImageViewInfo&, ViewUse);
+    Target Native(VideoCore::Image&, const VideoCore::ImageViewInfo&, ViewUse,
+                  vk::ImageLayout, vk::PipelineStageFlags2, vk::AccessFlags2);
     void Copy(Entry&, VideoCore::Image&, bool to_native);
     // Depth/stencil formats without blit support (D32S8 on RADV) are resampled by a
     // fullscreen draw writing gl_FragDepth and, with stencil export, the stencil value.
@@ -88,7 +113,16 @@ private:
     bool ShaderResampled(const VideoCore::Image&) const;
     void Resample(vk::Image src, vk::Image dst, const VideoCore::Image& original,
                   vk::Extent2D dst_size);
-    vk::Pipeline ResamplePipeline(vk::Format, bool stencil);
+    void ResampleImages(vk::Image src, vk::Image dst, vk::Format, bool depth, bool stencil,
+                        vk::SampleCountFlagBits source_samples, vk::SampleCountFlagBits dest_samples,
+                        vk::Extent2D dst_size);
+    struct ResampleKey {
+        vk::Format format;
+        bool depth, stencil, source_ms;
+        vk::SampleCountFlagBits samples;
+        bool operator==(const ResampleKey&) const = default;
+    };
+    vk::Pipeline ResamplePipeline(const ResampleKey&);
     void CreateResampleResources();
     void Transition(Entry&, vk::ImageAspectFlags, vk::ImageLayout,
                     vk::PipelineStageFlags2, vk::AccessFlags2);
@@ -108,8 +142,10 @@ private:
     std::array<std::pair<u64, Entry*>, 8> recent{}; ///< last entries by Key
     u32 recent_next = 0;
     vk::UniqueShaderModule fs_tri_vert, depth_frag, depth_stencil_frag, stencil_bits_frag;
+    vk::UniqueShaderModule depth_ms_frag, depth_stencil_ms_frag, stencil_bits_ms_frag;
+    vk::UniqueShaderModule color_ms_frag, color_ms_uint_frag, color_ms_sint_frag;
     vk::UniqueDescriptorSetLayout resample_set_layout;
     vk::UniquePipelineLayout resample_layout;
-    std::vector<std::pair<std::pair<vk::Format, bool>, vk::UniquePipeline>> resample_pipelines;
+    std::vector<std::pair<ResampleKey, vk::UniquePipeline>> resample_pipelines;
 };
 } // namespace Vulkan

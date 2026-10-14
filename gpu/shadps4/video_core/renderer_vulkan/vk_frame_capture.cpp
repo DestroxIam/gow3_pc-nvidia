@@ -40,6 +40,19 @@ std::vector<Entry> entries;
 std::vector<std::pair<Target, bool>> pending_sampled;
 std::vector<std::string> pending_buffers;
 
+// Diagnostic-only: several real VideoOut flips retain the complete command flow
+// when registered display buffers are also scratch targets. Keep Poll's mutable
+// ledger on one GPU thread by requiring the synchronous draw path.
+u32 CaptureFlips() {
+    static const u32 count = [] {
+        const char* value = std::getenv("GOW3_CAPTURE_FLIPS");
+        const char* pipe = std::getenv("GOW3_DRAW_PIPE");
+        return value && pipe && pipe[0] == '0'
+            ? u32(std::clamp(std::atoi(value), 1, 8)) : 0u;
+    }();
+    return count;
+}
+
 void AddBuffers(Entry& entry) {
     // Constants of full-screen passes (post-processing: camera matrices) and of the first draw
     // of each geometry pass.
@@ -185,7 +198,28 @@ std::string FrameCapture::LastResult() {
     return result;
 }
 
-void FrameCapture::Poll() {}
+void FrameCapture::Poll() {
+    const u32 count = CaptureFlips();
+    if (!count) return;
+    static u64 first_flip = 0;
+    const u64 serial = flips.load(std::memory_order_acquire);
+    if (state.load(std::memory_order_relaxed) == Armed) {
+        entries.clear();
+        pending_sampled.clear();
+        pending_buffers.clear();
+        pass_open = false;
+        first_flip = serial;
+        state.store(Recording, std::memory_order_relaxed);
+    } else if (state.load(std::memory_order_relaxed) == Recording &&
+               serial - first_flip >= count) {
+        Write(last_presented.load(std::memory_order_relaxed));
+        entries.clear();
+        pending_sampled.clear();
+        pending_buffers.clear();
+        pass_open = false;
+        state.store(Idle, std::memory_order_relaxed);
+    }
+}
 
 bool FrameCapture::IsDisplayBuffer(VAddr address) {
     const u32 count = display_count.load(std::memory_order_acquire);
@@ -231,7 +265,7 @@ void FrameCapture::BeginPass(const VideoCore::ImageInfo* const* colors, u32 num_
     display = display && targets.size() == 1 && display_copy;
     const bool new_pass = !(pass_open && !entries.empty() && !entries.back().compute &&
                             entries.back().colors == targets);
-    if (display && new_pass) {
+    if (!CaptureFlips() && display && new_pass) {
         if (state.load(std::memory_order_relaxed) == Recording) {
             Write(last_presented.load(std::memory_order_relaxed));
             entries.clear();

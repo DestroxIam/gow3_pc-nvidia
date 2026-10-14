@@ -68,22 +68,27 @@ public:
     bool OnFrameStart();
     void BeforeFrameDisplay();
     bool RasterScaling() const;
+    bool NativeVideo() const { return video_frame; }
+    bool SceneDisplayReady() const;
     /// gow3: LOD bias for scene materials, log2(render / output) while a reduced scene is
     /// upscaled (0 at native size, for TAA and without an upscaler).
     [[nodiscard]] float SceneMipBias() const;
     /// gow3: the state RedirectColor/RedirectDepth/RasterScaling depend on, for memoizing a
     /// draw's render state (Rasterizer::BeginRendering).
     [[nodiscard]] u64 RedirectState() const noexcept {
-        return u64(ui_phase) | u64(display_redirect) << 1 | u64(done_this_frame) << 2 |
-               u64(ui_color.index) << 8 | u64(ui_depth.index) << 36 |
-               u64(native_display_copy) << 3 | (native_display_frame << 44);
+        u64 state = 0xCBF29CE484222325ull;
+        for (u64 value : {u64(ui_phase),u64(display_redirect),u64(done_this_frame),
+                          u64(ui_color.index),u64(ui_depth.index),u64(native_display_copy),
+                          native_display_frame,redirect_generation,presentation_epoch,u64(video_frame)})
+            state = (state ^ value) * 0x100000001B3ull;
+        return state;
     }
 
 
     /// This frame's sub-pixel jitter in pixels (screen x right, y down); zero when off and after
     /// the upscale (post and UI are not jittered).
     [[nodiscard]] std::array<float, 2> Jitter() const noexcept {
-        return done_this_frame ? std::array<float, 2>{} : jitter;
+        return done_this_frame || video_frame ? std::array<float, 2>{} : jitter;
     }
 
     // Scaled presets.
@@ -91,7 +96,7 @@ public:
     /// After identifying this draw's targets, before drawing any UI pixels. Menus use
     /// spatial background copy and native UI, without needing scene depth or FSR history.
     void OnDraw(u64 vs_hash, VideoCore::ImageId color, VideoCore::ImageId depth,
-                bool native_viewport);
+                bool native_viewport, bool completed_scene_copy = false);
 
     /// A pass's first color target: the last render-size RGBA8 target before the UI is the
     /// game's finished frame.
@@ -114,7 +119,7 @@ public:
                          vk::ImageView& view, vk::ImageLayout& layout);
     /// Whether RedirectSampled would replace `image` (it may record a barrier then).
     [[nodiscard]] bool RedirectsSampled(VideoCore::ImageId image) const {
-        return display_redirect && image == ui_color;
+        return !video_frame && display_redirect && image == ui_color;
     }
 
     /// Presenter: the output-size display buffer standing in for the guest one at `address`.
@@ -124,6 +129,8 @@ public:
         u32 width, height;
     };
     bool DisplayOverride(VAddr address, Display& display);
+    /// Ordered GPU flip: publish spatial/video composition and reject stale host frames.
+    void FinalizePresentation(VAddr address, vk::Format format);
 
 private:
     /// gow3: views of guest images the upscaler reads, kept across frames: FSR 4 registers
@@ -144,8 +151,12 @@ private:
     void Run();
     void RunScaled();
     void RunUiOnly(VideoCore::ImageId color, VideoCore::ImageId depth);
-    void EnsureUiResources(u32 width, u32 height, vk::Format color, vk::Format depth);
+    void EnsureUiResources(u32 width, u32 height, vk::Format color, vk::Format depth,
+                           vk::SampleCountFlagBits depth_samples=vk::SampleCountFlagBits::e1);
     void PrepareUiDepth(VideoCore::ImageId depth);
+    /// NGX/motion consume single-sample depth; resolve guest MSAA through Vulkan.
+    bool ResolveTemporalDepth(vk::Image image, vk::Format format, u32 width, u32 height,
+                              vk::Image& resolved_image, vk::ImageView& resolved_view);
     /// Render size below the scaled-preset output size (the resolution patch is on).
     [[nodiscard]] bool Scaled() const;
     /// A target of the patched render size: the game allocates it with aligned dimensions
@@ -221,17 +232,26 @@ private:
     bool display_redirect = false; ///< the display pass of an upscaled frame
     bool native_display_copy = false;
     u64 native_display_frame = 0;
+    u64 redirect_generation = 0;
+    u64 presentation_epoch = 0;
+    bool presentation_dirty = false;
+    bool video_frame = false;
     bool ui_read_barrier = false;
     VideoCore::UniqueImage ui_image;
     VideoCore::UniqueImage ui_depth_image;
     vk::UniqueImageView ui_view;
     vk::UniqueImageView ui_depth_view;
+    VideoCore::UniqueImage temporal_depth_image;
+    vk::UniqueImageView temporal_depth_attachment_view, temporal_depth_sample_view;
+    u32 temporal_depth_width = 0, temporal_depth_height = 0;
+    vk::Format temporal_depth_format = vk::Format::eUndefined;
     bool depth_blit = false;
     bool scaled_session = false;
     u32 ui_width = 0, ui_height = 0;
     u32 render_width = 0, render_height = 0;
     vk::Format ui_format = vk::Format::eUndefined;
     vk::Format ui_depth_format = vk::Format::eUndefined;
+    vk::SampleCountFlagBits ui_depth_samples = vk::SampleCountFlagBits::e1;
     /// Views of the port's images in the formats/swizzles the game's views use.
     struct MirrorView {
         vk::Format format;
@@ -248,7 +268,10 @@ private:
         u32 width = 0, height = 0;
         bool valid = false;
         u64 native_frame = 0;
+        u64 write_epoch = 0;
     };
+    void EnsureDisplayImage(DisplayImage& display, vk::Format format, u32 width, u32 height);
+    void CopyUiToDisplay(DisplayImage& display);
     std::mutex display_mutex;
     std::unordered_map<VAddr, DisplayImage> displays;
     FfxVkPortableUpscaleContext* context = nullptr;

@@ -12,7 +12,8 @@ import zipfile
 from paths import ROOT
 PACKAGING=ROOT/'packaging/windows'
 sys.path.insert(0,str(PACKAGING))
-from publication_policy import allowed_publication, allowed_source, renderer_sync_report
+from publication_policy import allowed_publication, allowed_source, renderer_sync_report, fsr_recipe_report
+from runtime_provenance import sha256, json_digest
 spec=importlib.util.spec_from_file_location('optiscaler_source_package',PACKAGING/'package-optiscaler-source.py')
 source_package=importlib.util.module_from_spec(spec);spec.loader.exec_module(source_package)
 
@@ -83,8 +84,47 @@ class SourcePackageTest(unittest.TestCase):
         self.assertEqual(result.returncode,0,result.stderr)
         self.assertFalse(target.exists());self.assertFalse(target.with_suffix('.audit.json').exists())
 
+    def test_full_overlay_digest_and_actual_recipe_change_with_backend_source(self):
+        recipe={'commands':[['msbuild','OptiScaler/OptiScaler.vcxproj','/p:Configuration=Release','/p:Platform=x64']],
+                'toolchain':{'compiler':'fixture MSVC 14.44','sdk':'fixture 10.0.26100.0'}}
+        self.put('OptiScaler/include/imgui/imgui_impl_vulkan.cpp',b'backend fix one')
+        _,first=source_package.collect_source(self.upstream,self.source,recipe)
+        self.assertEqual(first['build_recipe'],recipe)
+        self.assertEqual(first['overlay_sha256'],json_digest(first['overlay']))
+        self.put('OptiScaler/include/imgui/imgui_impl_vulkan.cpp',b'backend fix two')
+        self.put('OptiScaler/dlssnr/queue_lifecycle.cpp',b'new lifecycle fix')
+        _,second=source_package.collect_source(self.upstream,self.source,recipe)
+        self.assertNotEqual(first['overlay_sha256'],second['overlay_sha256'])
+        self.assertNotEqual(first['source_tree_sha256'],second['source_tree_sha256'])
+
 
 class PublicationPolicyTest(unittest.TestCase):
+    def test_clean_dependency_plus_declared_patch_matches_parent_without_mutating_either_index(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root=Path(folder);public=root/'public';parent=root/'parent'
+            child='gpu/third_party/fsr-vulkan';source=parent/child;source.mkdir(parents=True)
+            def git(path,*args):return subprocess.check_output(['git','-C',str(path),*args],stderr=subprocess.PIPE)
+            git(source,'init','--quiet');(source/'provider.c').write_bytes(b'original\n')
+            git(source,'add','.');git(source,'-c','user.name=Fixture','-c','user.email=fixture@example.invalid',
+                                      'commit','--quiet','-m','fixture')
+            target=public/child;target.parent.mkdir(parents=True)
+            subprocess.run(['git','clone','--quiet',str(source),str(target)],check=True,capture_output=True)
+            (source/'provider.c').write_bytes(b'compiled dependency fix\n')
+            patch=public/'gpu/patches/fsr-vulkan/0001-fixture.patch';patch.parent.mkdir(parents=True)
+            patch.write_bytes(git(source,'diff').replace(b'\n',b'\r\n'))
+            indexes=[path/'.git/index' for path in (source,target)]
+            before=[path.read_bytes() for path in indexes]
+            result=fsr_recipe_report(public,parent)
+            self.assertTrue(result['matched'])
+            self.assertEqual([path.read_bytes() for path in indexes],before)
+            self.assertEqual((target/'provider.c').read_bytes().replace(b'\r\n',b'\n'),b'original\n')
+            self.assertEqual((source/'provider.c').read_bytes(),b'compiled dependency fix\n')
+            (source/'provider.c').write_bytes(b'fix missing from declared patch\n')
+            self.assertFalse(fsr_recipe_report(public,parent)['matched'])
+            (source/'provider.c').write_bytes(b'compiled dependency fix\n')
+            (target/'provider.c').write_bytes(b'unrecorded public dependency change\n')
+            self.assertFalse(fsr_recipe_report(public,parent)['matched'])
+
     def test_runtime_models_and_player_state_excluded_forwarder_allowed(self):
         for name in ('OptiScaler/nvngx_dlssnr.dll','OptiScaler/nvngx_dlssnr_310.dll','user/last_run.log',
                      'Game/game.iso','OptiScaler/weights.safetensors','OptiScaler/model.bin','logs/private.txt'):
@@ -98,7 +138,8 @@ class PublicationPolicyTest(unittest.TestCase):
             base=Path(folder);parent=base/'parent';public=base/'public'
             names=['gpu/shadps4/video_core/renderer_vulkan/new.cpp','gpu/shim/new.h',
                    'gpu/shadps4/video_core/renderer_vulkan/shaders/new.comp','tests/test_new.cpp',
-                   'gpu/shadps4/CMakeLists.txt']
+                   'gpu/shadps4/CMakeLists.txt','gpu/shadps4/core/libraries/avplayer/new.cpp',
+                   'src/new_runtime.c','gpu/third_party/fsr-vulkan/src/new_provider.c']
             for name in names:
                 file=parent/name;file.parent.mkdir(parents=True,exist_ok=True);file.write_text('new source')
             result=renderer_sync_report(public,parent)
@@ -129,11 +170,25 @@ class PortablePackageTest(unittest.TestCase):
             marker={'native_nr_after_sr':True,'probe_sha256':hashlib.sha256(b'new probe').hexdigest(),
                     'optiscaler_sha256':hashlib.sha256(b'new validated proxy').hexdigest()}
             put(effects,'renderer-build.json',json.dumps(marker).encode())
+            recipe={'commands':[['cmake','--build','out/native']],'toolchain':{'compiler':'fixture compiler 1.0'}}
+            identity={'source_commit':'a'*40,'upstream_commit':'b'*40,'upstream_tag':'windows-v2.1.8',
+                'source_dirty':True,'tracked_source_diff_sha256':'c'*64,'untracked_source_sha256':'d'*64,
+                'source_tree_sha256':'e'*64,'build_recipe':recipe,'probe_sha256':marker['probe_sha256']}
+            put(native,'source-manifest.json',json.dumps(identity).encode())
+            opti={'upstream_commit':source_package.UPSTREAM_COMMIT,'upstream_archive_sha256':'f'*64,
+                'overlay_sha256':'1'*64,'source_tree_sha256':'2'*64,'build_recipe':recipe}
+            effects_identity={**identity,'optiscaler_sha256':marker['optiscaler_sha256'],'optiscaler_source':opti}
+            put(effects,'source-manifest.json',json.dumps(effects_identity).encode())
+            receipt={'native_sr_gameplay':True,'native_nr_after_sr':True,
+                **{key:marker[key] for key in ('probe_sha256','optiscaler_sha256')},
+                'source_manifest_sha256':sha256(native/'source-manifest.json'),
+                'effects_source_manifest_sha256':sha256(effects/'source-manifest.json')}
+            receipt_path=work/'receipt.json';receipt_path.write_text(json.dumps(receipt))
             upstream=work/'base.zip'
             with zipfile.ZipFile(upstream,'w') as archive:archive.writestr('gow3-windows/bin/gow3-probe.exe',b'original')
             command=[sys.executable,str(PACKAGING/'package-nvidia-preview.py'),'--source-root',str(root),
                 '--base-zip',str(upstream),'--runtime-root',str(normal),'--native-runtime',str(native),
-                '--native-effects-runtime',str(effects),'--output',str(out)]
+                '--native-effects-runtime',str(effects),'--receipt',str(receipt_path),'--output',str(out)]
             out.mkdir();(out/'SHA256SUMS.txt').write_text('sourcehash  corresponding-source.zip\n')
             result=subprocess.run(command,capture_output=True,text=True)
             self.assertEqual(result.returncode,0,result.stderr)
@@ -141,6 +196,9 @@ class PortablePackageTest(unittest.TestCase):
             self.assertEqual((stage/'bin-native-effects/winmm.dll').read_bytes(),b'new validated proxy')
             staged=json.loads((stage/'bin-native-effects/renderer-build.json').read_text())
             self.assertTrue(staged['native_nr_after_sr'])
+            self.assertEqual(staged['source_commit'],identity['source_commit'])
+            self.assertEqual(staged['tracked_source_diff_sha256'],identity['tracked_source_diff_sha256'])
+            self.assertEqual(staged['optiscaler_source'],opti)
             self.assertFalse((stage/'bin-native-effects/OptiScaler/nvngx_dlssnr.dll').exists())
             self.assertTrue((stage/'bin-native-effects/OptiScaler/nvngx.dll_dlssnr.dll').exists())
             self.assertFalse((stage/'Game/other-game.dat').exists())
@@ -149,6 +207,17 @@ class PortablePackageTest(unittest.TestCase):
             repeated=subprocess.run(command,capture_output=True,text=True)
             self.assertNotEqual(repeated.returncode,0)
             self.assertIn('fresh output directory',repeated.stderr)
+            # Source/receipt proof is required even when the NR capability itself is disabled.
+            marker['native_nr_after_sr']=False
+            put(effects,'renderer-build.json',json.dumps(marker).encode())
+            put(effects,'source-manifest.json',json.dumps({**effects_identity,'source_commit':'9'*40}).encode())
+            command[-1]=str(work/'stale-source-output')
+            stale=subprocess.run(command,capture_output=True,text=True)
+            self.assertNotEqual(stale.returncode,0)
+            self.assertIn('manifest does not match',stale.stderr)
+            self.assertFalse((work/'stale-source-output').exists())
+            put(effects,'source-manifest.json',json.dumps(effects_identity).encode())
+            marker['native_nr_after_sr']=True
             marker['probe_sha256']='0'*64
             put(effects,'renderer-build.json',json.dumps(marker).encode())
             command[-1]=str(work/'bad-output')

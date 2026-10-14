@@ -8,8 +8,94 @@
 #include "core/libraries/libs.h"
 
 #include <string_view>
+#include <string>
+#include <algorithm>
+#include <cctype>
+#include <cstdio>
+#include <cstring>
+#include <cstdlib>
+#include <atomic>
+#include <mutex>
+#include <unordered_set>
 
 namespace Libraries::AvPlayer {
+
+namespace {
+std::mutex video_players_mutex;
+std::unordered_set<AvPlayerHandle> video_players;
+std::atomic<bool> video_active{false};
+void TrackVideo(AvPlayerHandle handle, bool active) {
+    std::scoped_lock lock{video_players_mutex};
+    if (active) video_players.insert(handle);
+    else video_players.erase(handle);
+    video_active.store(!video_players.empty(), std::memory_order_release);
+}
+}
+bool VideoPlaybackActive() {
+    return video_active.load(std::memory_order_acquire);
+}
+
+const char* SelectTestMovieSource(std::string_view path, const char* caller) {
+    const char* selected = std::getenv("GOW3_AVPLAYER_TEST_SOURCE");
+    if (!selected || !*selected) return nullptr;
+    const auto slash = path.find_last_of("/\\");
+    const auto name = slash == std::string_view::npos ? path : path.substr(slash + 1);
+    const auto same_name = [](std::string_view a, std::string_view b) {
+        return a.size() == b.size() && std::equal(a.begin(), a.end(), b.begin(),
+            [](unsigned char x, unsigned char y) { return std::toupper(x) == std::toupper(y); });
+    };
+    const bool opening_video = same_name(name, "OPENINGCREDITS.BSF");
+    const bool opening_audio = same_name(name, "OPENINGCREDITS.XVAG");
+    const bool opening_text = same_name(name, "OPENINGCREDITS.TXT");
+    bool replace = opening_video || opening_audio || opening_text;
+    const char* effective = selected;
+    if (replace) {
+        // The BSF video and XVAG audio are separate assets in the local dump.
+        // Accept either selected asset and derive its companion in the same mount.
+        static thread_local std::string companion;
+        companion = selected;
+        std::replace(companion.begin(), companion.end(), '\\', '/');
+        const auto dot = companion.find_last_of('.');
+        const auto selected_name = std::string_view(companion);
+        const bool audio = dot != std::string::npos && same_name(selected_name.substr(dot), ".XVAG");
+        const bool video = dot != std::string::npos && same_name(selected_name.substr(dot), ".BSF");
+        replace = audio || video;
+        if (replace) {
+            std::string upper = companion;
+            std::transform(upper.begin(), upper.end(), upper.begin(),
+                [](unsigned char c) { return char(std::toupper(c)); });
+            constexpr std::string_view audio_dir = "/SOUNDS/STREAMS_PS4/CINEMATICS/";
+            constexpr std::string_view video_dir = "/CINEMATICS/";
+            if (audio && !opening_audio) {
+                const auto directory = upper.find(audio_dir);
+                if (directory == std::string::npos) replace = false;
+                else companion.replace(directory, audio_dir.size(), video_dir);
+            } else if (video && opening_audio) {
+                const auto directory = upper.find(video_dir);
+                if (directory == std::string::npos) replace = false;
+                else companion.replace(directory, video_dir.size(), audio_dir);
+            }
+            if (replace) {
+                companion.replace(companion.find_last_of('.'), std::string::npos,
+                    opening_audio ? ".XVAG" : opening_video ? ".BSF" : ".TXT");
+                effective = companion.c_str();
+            }
+        }
+    }
+    // The guest-file hook is called for all paths. Log only opening matches
+    // there; AvPlayer calls also report mismatches to expose the requested URI.
+    static std::atomic<unsigned> matches{0}, mismatches{0};
+    const bool trace = replace ? matches.fetch_add(1, std::memory_order_relaxed) < 16 :
+        std::strcmp(caller, "guest-file") != 0 &&
+        mismatches.fetch_add(1, std::memory_order_relaxed) < 8;
+    if (trace) {
+        std::printf("GoW3 test source [%s]: requested=%.*s selected=%s override=%d\n",
+            caller, int(std::min(path.size(), size_t{1024})), path.empty() ? "" : path.data(),
+            replace ? effective : selected, int(replace));
+        std::fflush(stdout);
+    }
+    return replace ? effective : nullptr;
+}
 
 s32 PS4_SYSV_ABI sceAvPlayerAddSource(AvPlayerHandle handle, const char* filename) {
     LOG_TRACE(Lib_AvPlayer, "filename = {}", filename);
@@ -39,6 +125,7 @@ s32 PS4_SYSV_ABI sceAvPlayerClose(AvPlayerHandle handle) {
     if (handle == nullptr) {
         return ORBIS_AVPLAYER_ERROR_INVALID_PARAMS;
     }
+    TrackVideo(handle, false);
     delete handle;
     return ORBIS_OK;
 }
@@ -89,7 +176,10 @@ bool PS4_SYSV_ABI sceAvPlayerGetVideoData(AvPlayerHandle handle, AvPlayerFrameIn
     if (handle == nullptr || video_info == nullptr) {
         return false;
     }
-    return handle->GetVideoData(*video_info);
+    const bool got_frame = handle->GetVideoData(*video_info);
+    if (got_frame) TrackVideo(handle, true);
+    else if (!handle->IsActive()) TrackVideo(handle, false);
+    return got_frame;
 }
 
 bool PS4_SYSV_ABI sceAvPlayerGetVideoDataEx(AvPlayerHandle handle,
@@ -98,7 +188,10 @@ bool PS4_SYSV_ABI sceAvPlayerGetVideoDataEx(AvPlayerHandle handle,
     if (handle == nullptr || video_info == nullptr) {
         return false;
     }
-    return handle->GetVideoData(*video_info);
+    const bool got_frame = handle->GetVideoData(*video_info);
+    if (got_frame) TrackVideo(handle, true);
+    else if (!handle->IsActive()) TrackVideo(handle, false);
+    return got_frame;
 }
 
 AvPlayerHandle PS4_SYSV_ABI sceAvPlayerInit(AvPlayerInitData* data) {
@@ -149,7 +242,9 @@ bool PS4_SYSV_ABI sceAvPlayerIsActive(AvPlayerHandle handle) {
     if (handle == nullptr) {
         return false;
     }
-    return handle->IsActive();
+    const bool active = handle->IsActive();
+    if (!active) TrackVideo(handle, false);
+    return active;
 }
 
 s32 PS4_SYSV_ABI sceAvPlayerJumpToTime(AvPlayerHandle handle, uint64_t time) {
@@ -226,7 +321,9 @@ s32 PS4_SYSV_ABI sceAvPlayerStart(AvPlayerHandle handle) {
     if (handle == nullptr) {
         return ORBIS_AVPLAYER_ERROR_INVALID_PARAMS;
     }
-    return handle->Start();
+    const auto result = handle->Start();
+    if (result == ORBIS_OK) TrackVideo(handle, true);
+    return result;
 }
 
 s32 PS4_SYSV_ABI sceAvPlayerStop(AvPlayerHandle handle) {
@@ -236,7 +333,9 @@ s32 PS4_SYSV_ABI sceAvPlayerStop(AvPlayerHandle handle) {
     }
     // gow3: guest code calls this and cannot unwind a C++ exception.
     try {
-        return handle->Stop();
+    const auto result = handle->Stop();
+    if (result == ORBIS_OK) TrackVideo(handle, false);
+    return result;
     } catch (const std::exception& error) {
         LOG_ERROR(Lib_AvPlayer, "Stop failed: {}", error.what());
         return ORBIS_AVPLAYER_ERROR_OPERATION_FAILED;
@@ -257,6 +356,13 @@ s32 PS4_SYSV_ABI sceAvPlayerVprintf(const char* format, va_list args) {
 }
 
 void RegisterLib(Core::Loader::SymbolsResolver* sym) {
+    if (const char* selected = std::getenv("GOW3_AVPLAYER_TEST_SOURCE"); selected && *selected) {
+        static std::atomic<bool> reported{false};
+        if (!reported.exchange(true, std::memory_order_relaxed)) {
+            std::printf("GoW3 test source: override armed selected=%s\n", selected);
+            std::fflush(stdout);
+        }
+    }
     LIB_FUNCTION("KMcEa+rHsIo", "libSceAvPlayer", 1, "libSceAvPlayer", sceAvPlayerAddSource);
     LIB_FUNCTION("x8uvuFOPZhU", "libSceAvPlayer", 1, "libSceAvPlayer", sceAvPlayerAddSourceEx);
     LIB_FUNCTION("buMCiJftcfw", "libSceAvPlayer", 1, "libSceAvPlayer", sceAvPlayerChangeStream);
@@ -287,3 +393,7 @@ void RegisterLib(Core::Loader::SymbolsResolver* sym) {
 };
 
 } // namespace Libraries::AvPlayer
+
+extern "C" const char* gow3_avplayer_test_source_path(const char* requested) {
+    return requested ? Libraries::AvPlayer::SelectTestMovieSource(requested, "guest-file") : nullptr;
+}

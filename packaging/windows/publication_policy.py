@@ -1,5 +1,8 @@
 """Shared, fail-closed publication paths and corresponding-source file policy."""
 from pathlib import Path, PurePosixPath
+import os
+import subprocess
+import tempfile
 
 BLOCKED_PARTS={'eboot.bin','sce_module','sce_sys','savedata','savedata_backups','settings.json',
                'user','out','cache','logs','__pycache__','.git','.env','.vs','.idea'}
@@ -49,13 +52,54 @@ def allowed_source(value, pinned=False):
     if pinned and path.suffix.lower() in {'.lib','.a','.spv','.cso'}: return True
     return path.suffix.lower() in SOURCE_SUFFIXES
 
+def fsr_recipe_report(public_root, renderer_root):
+    """Compare the declared patched dependency trees without editing either checkout."""
+    public=Path(public_root)/'gpu/third_party/fsr-vulkan'
+    parent=Path(renderer_root)/'gpu/third_party/fsr-vulkan'
+    if not (public/'.git').exists() or not (parent/'.git').exists(): return None
+    def git(root,*args,env=None,input_data=None):
+        return subprocess.check_output(['git','-C',str(root.resolve()),*args],env=env,
+                                       input=input_data,stderr=subprocess.PIPE).decode().strip()
+    public_head=git(public,'rev-parse','HEAD');parent_head=git(parent,'rev-parse','HEAD')
+    patches=sorted((Path(public_root)/'gpu/patches/fsr-vulkan').glob('*.patch'))
+    if not patches:raise ValueError('Missing declared FSR dependency patches')
+    with tempfile.TemporaryDirectory(prefix='gow3-source-check-') as folder:
+        def tree(root,label,apply):
+            env=dict(os.environ,GIT_INDEX_FILE=str(Path(folder)/label))
+            git(root,'read-tree','HEAD',env=env)
+            if apply:
+                for patch in patches:
+                    git(root,'apply','--cached','-',env=env,input_data=patch.read_bytes().replace(b'\r\n',b'\n'))
+            else:
+                # Capture current tracked dependency content into an isolated index.
+                # This leaves the real index, worktree and refs untouched.
+                git(root,'add','-u','--','.',env=env)
+            untracked=git(root,'ls-files','--others','--exclude-standard').splitlines()
+            if any(Path(name).suffix.lower() in SOURCE_SUFFIXES for name in untracked):
+                raise ValueError('Untracked FSR source needs a declared corresponding-source patch')
+            return git(root,'write-tree',env=env)
+        expected=tree(public,'expected-index',True)
+        actual=tree(parent,'parent-index',False)
+        public_actual=tree(public,'public-index',False)
+        clean_env=dict(os.environ,GIT_INDEX_FILE=str(Path(folder)/'clean-index'))
+        git(public,'read-tree','HEAD',env=clean_env)
+        clean_tree=git(public,'write-tree',env=clean_env)
+        public_matches=public_actual in {clean_tree,expected}
+    return {'pinned_commit':public_head,'parent_commit':parent_head,'expected_tree':expected,
+            'parent_effective_tree':actual,'public_effective_tree':public_actual,
+            'public_tree_matches_recipe':public_matches,
+            'matched':public_head==parent_head and expected==actual and public_matches}
+
+
 def renderer_sync_report(public_root, renderer_root):
     """Check, never copy, the renderer source/shaders/tests the parent must integrate."""
     public_root=Path(public_root); renderer_root=Path(renderer_root)
-    folders=('gpu/shadps4/video_core','gpu/shadps4/shader_recompiler','gpu/shim','gpu/patches','tests')
+    folders=('gpu/shadps4','gpu/shim','gpu/dlss_bridge','gpu/patches','src','tests',
+             'gpu/third_party/fsr-vulkan')
     suffixes={'.cpp','.cc','.cxx','.c','.h','.hpp','.inl','.inc','.glsl','.hlsl','.hlsli',
               '.comp','.frag','.vert','.geom','.tesc','.tese','.patch','.cmake'}
     checked=[]; mismatches=[]
+    dependency=fsr_recipe_report(public_root,renderer_root)
     for folder in folders:
         directory=renderer_root/folder
         if not directory.is_dir(): continue
@@ -65,13 +109,16 @@ def renderer_sync_report(public_root, renderer_root):
             if path.is_symlink(): raise ValueError('Symlink in renderer source: '+str(relative))
             destination=public_root/relative
             checked.append(relative.as_posix())
-            if not destination.is_file() or destination.read_bytes()!=path.read_bytes():
+            declared_dependency = folder=='gpu/third_party/fsr-vulkan' and dependency and dependency['matched']
+            if not declared_dependency and (not destination.is_file() or destination.read_bytes()!=path.read_bytes()):
                 mismatches.append(relative.as_posix())
-    for name in ('CMakeLists.txt','gpu/CMakeLists.txt','gpu/shadps4/CMakeLists.txt'):
+    for name in ('CMakeLists.txt','gpu/CMakeLists.txt','gpu/shadps4/CMakeLists.txt','build.sh','tests/data/isa_fixture.bin'):
         path=renderer_root/name
         if not path.is_file(): continue
         if path.is_symlink(): raise ValueError('Symlink in renderer source: '+name)
         checked.append(name)
         if not (public_root/name).is_file() or (public_root/name).read_bytes()!=path.read_bytes(): mismatches.append(name)
     if not checked: raise ValueError('No renderer source found for the synchronization check')
-    return {'checked_files':len(checked),'mismatches':mismatches,'matched':not mismatches}
+    if dependency and not dependency['matched']:mismatches.append('gpu/third_party/fsr-vulkan [declared patch tree mismatch]')
+    return {'checked_files':len(checked),'mismatches':mismatches,'matched':not mismatches,
+            'fsr_dependency_recipe':dependency}

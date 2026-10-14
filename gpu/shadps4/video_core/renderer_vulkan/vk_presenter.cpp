@@ -383,6 +383,11 @@ static void DumpRaw(const Instance& instance, Scheduler& scheduler, vk::CommandB
 
 Frame* Presenter::PrepareFrame(const Libraries::VideoOut::BufferAttributeGroup& attribute,
                                VAddr cpu_address) {
+    // The flip is ordered on the GPU command thread, but the draw recorder may
+    // still own earlier packets. Complete those before reading composition state.
+    rasterizer->DrainDrawPipe();
+    rasterizer->GetUpscaler().FinalizePresentation(cpu_address,
+                                                  GetFrameViewFormat(attribute.attrib.pixel_format));
     // gow3: GOW3_FRAME_DUMP_TRIGGER=<file>: when the file exists it is removed and this frame's
     // guest display buffer and presented image are written to GOW3_DUMP_DIR (default out/dump)
     // as raw 32-bit pixels (menus and movies included; the upscaler dumps scene frames only).

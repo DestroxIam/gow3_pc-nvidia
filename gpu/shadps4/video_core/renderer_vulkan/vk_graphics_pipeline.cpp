@@ -4,6 +4,8 @@
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <cstdio>
+#include <cstdlib>
 #include <utility>
 #include <boost/container/small_vector.hpp>
 
@@ -31,6 +33,53 @@ namespace {
 using Clock = std::chrono::steady_clock;
 u64 NsSince(Clock::time_point start) {
     return u64(std::chrono::duration_cast<std::chrono::nanoseconds>(Clock::now() - start).count());
+}
+
+Shader::Backend::SPIRV::AuxTessellationInterface AuxTessellationParameters(
+    const Shader::Info& vertex, const Shader::Profile& profile) {
+    std::array<u8, Shader::IR::NumParams> exports{};
+    for (u32 i = 0; i < exports.size(); ++i) {
+        const auto param = Shader::IR::Attribute::Param0 + i;
+        if (vertex.stores.GetAny(param)) {
+            // Match DefineOutputs' declared width, not the guest export's write mask.
+            exports[i] = vertex.stores.NumComponents(param);
+        }
+    }
+    const bool emulated_clip = vertex.hw_stage == Shader::HwStage::Vertex &&
+                               profile.needs_clip_distance_emulation &&
+                               vertex.stores.GetAny(Shader::IR::Attribute::ClipDistance);
+    return Shader::Backend::SPIRV::AuxTessellationInterface::FromVertexExports(exports,
+                                                                            emulated_clip);
+}
+
+void TraceAuxTessellationInterface(const Instance& instance, const Shader::Info& vertex,
+                                  const Shader::Info* fragment,
+                                  const Shader::HwFragmentRuntimeInfo& runtime,
+                                  const Shader::Backend::SPIRV::AuxTessellationInterface& interface) {
+    static const bool enabled = std::getenv("GOW3_AUX_INTERFACE_TRACE") != nullptr;
+    static std::atomic<u32> reports{};
+    if (!enabled || reports.fetch_add(1, std::memory_order_relaxed) >= 32) return;
+    u64 produced = 0, consumed = runtime.clip_distance_emulation ? 1 : 0;
+    u32 vertex_slots = 0, fragment_slots = 0;
+    for (u32 i = 0; i < interface.components.size(); ++i) {
+        if (interface.components[i]) produced |= u64{1} << i;
+    }
+    for (u32 i = 0; i < Shader::IR::NumParams; ++i) {
+        if (vertex.stores.GetAny(Shader::IR::Attribute::Param0 + i)) vertex_slots |= u32{1} << i;
+    }
+    const u32 inputs = runtime.num_inputs - u32(runtime.clip_distance_emulation);
+    for (u32 i = 0; fragment && i < inputs; ++i) {
+        const auto& input = runtime.inputs[i];
+        if (input.IsDefault() || !fragment->loads.GetAny(Shader::IR::Attribute::Param0 + i)) continue;
+        fragment_slots |= u32{1} << i;
+        consumed |= u64{1} << (input.param_index + u32(runtime.clip_distance_emulation));
+    }
+    std::printf("GoW3 aux interface: vs %016llx fs %016llx hw_clip %d emulated_clip %d VS_slots %08x FS_slots %08x produced %09llx consumed %09llx missing %09llx\n",
+        (unsigned long long)vertex.pgm_hash, (unsigned long long)(fragment ? fragment->pgm_hash : 0),
+        int(instance.IsShaderClipDistanceSupported()), int(runtime.clip_distance_emulation),
+        vertex_slots, fragment_slots, (unsigned long long)produced,
+        (unsigned long long)consumed, (unsigned long long)(consumed & ~produced));
+    std::fflush(stdout);
 }
 } // namespace
 
@@ -213,8 +262,12 @@ GraphicsPipeline::GraphicsPipeline(
     } else if (is_rect_list || is_quad_list) {
         const auto type = is_quad_list ? AuxShaderType::QuadListTCS : AuxShaderType::RectListTCS;
         if (!preloading) {
-            const auto& fs_info = runtime_infos[u32(Shader::SwStage::Fragment)].hw.fs;
-            sdata.tcs = Shader::Backend::SPIRV::EmitAuxilaryTessShader(type, fs_info);
+            const auto& vertex = *infos[u32(Shader::SwStage::Vertex)];
+            const auto interface = AuxTessellationParameters(vertex, profile);
+            TraceAuxTessellationInterface(instance, vertex, infos[u32(Shader::SwStage::Fragment)],
+                runtime_infos[u32(Shader::SwStage::Fragment)].hw.fs, interface);
+            sdata.tcs = Shader::Backend::SPIRV::EmitAuxilaryTessShader(
+                type, interface);
         }
         shader_stages.emplace_back(vk::PipelineShaderStageCreateInfo{
             .stage = vk::ShaderStageFlagBits::eTessellationControl,
@@ -231,9 +284,9 @@ GraphicsPipeline::GraphicsPipeline(
         });
     } else if (is_rect_list || is_quad_list) {
         if (!preloading) {
-            const auto& fs_info = runtime_infos[u32(Shader::SwStage::Fragment)].hw.fs;
             sdata.tes = Shader::Backend::SPIRV::EmitAuxilaryTessShader(
-                AuxShaderType::PassthroughTES, fs_info);
+                AuxShaderType::PassthroughTES,
+                AuxTessellationParameters(*infos[u32(Shader::SwStage::Vertex)], profile));
         }
         shader_stages.emplace_back(vk::PipelineShaderStageCreateInfo{
             .stage = vk::ShaderStageFlagBits::eTessellationEvaluation,

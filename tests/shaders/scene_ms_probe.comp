@@ -1,0 +1,15 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
+#version 450
+#extension GL_EXT_samplerless_texture_functions : require
+layout(local_size_x = 2) in;
+layout(binding = 0) uniform texture2DMS src_color;
+layout(binding = 1) uniform texture2DMS src_depth;
+layout(binding = 2) uniform utexture2DMS src_stencil;
+layout(binding = 3, rgba32f) writeonly uniform image2D result;
+layout(push_constant) uniform Extent { uint width; uint height; uint reserved0; uint reserved1; } pc;
+void main() {
+    int sample_id = int(gl_GlobalInvocationID.x);
+    ivec2 coord = ivec2(pc.width - 1u, pc.height - 1u);
+    imageStore(result, ivec2(sample_id,0), vec4(texelFetch(src_color,coord,sample_id).rg,
+        texelFetch(src_depth,coord,sample_id).r, float(texelFetch(src_stencil,coord,sample_id).r)));
+}

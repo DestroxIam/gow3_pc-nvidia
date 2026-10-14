@@ -31,6 +31,19 @@ constexpr bool MovieShader(uint64_t hash) {
            hash == 0x24042a9b || hash == 0xa400228b;
 }
 
+// GoW3 decoded Y/UV planes -> RGBA. This is a video conversion, not UI:
+// the native post-processing chain must still consume the converted guest image.
+constexpr bool VideoShader(uint64_t hash) {
+    return uint32_t(hash) == 0xb4c8fcb8;
+}
+
+// Vertex programs for the game's final display-copy paths (including the
+// general fullscreen-post variant); classify programs, never game areas/saves.
+constexpr bool SceneCopyShader(uint64_t hash) {
+    const auto code = uint32_t(hash);
+    return code == 0x56d7530b || code == 0x3167b1ca || code == 0x77985107;
+}
+
 inline std::array<float, 2> Scale(uint32_t guest_width, uint32_t guest_height,
                                 uint32_t output_width, uint32_t output_height,
                                 bool native_coordinates) {

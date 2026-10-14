@@ -268,8 +268,15 @@ void Rasterizer::PrepareRenderState(const GraphicsPipeline* pipeline) {
     // gow3: the G-buffer pass (5+ color targets) holds the scene depth, and its constants the
     // main camera (shadow passes bind the same layout with the light's camera).
     bool has_color=false;
-    for(unsigned cb=0;cb<cb_descs.size();++cb)
-        has_color|=bool((key.mrt_mask & (1u<<cb)) && cb_descs[cb].first);
+    u32 color_writes=0;
+    for(unsigned cb=0;cb<cb_descs.size();++cb) {
+        // Bound attachments/export slots alone do not make this a color pass.
+        // Depth prepasses may retain them while all color components are masked off.
+        if ((key.mrt_mask & (1u<<cb)) && cb_descs[cb].first && bool(key.write_masks[cb])) {
+            has_color=true;
+            color_writes |= 1u<<cb;
+        }
+    }
     const bool no_color = skip_cb_binding || !has_color;
     const bool gow3_depth = db_desc.first && no_color &&
         regs.depth_control.depth_write_enable && !regs.IsClipDisabled() &&
@@ -287,6 +294,28 @@ void Rasterizer::PrepareRenderState(const GraphicsPipeline* pipeline) {
     }
     gbuffer_draw = camera_motion->Enabled() && db_desc.first &&
                    (gow3_depth || std::popcount(key.mrt_mask) >= 5);
+    static const bool role_trace = std::getenv("GOW3_SCENE_ROLE_TRACE") != nullptr;
+    if (role_trace && db_desc.first && regs.num_indices>6) {
+        const auto& di=texture_cache.GetImage(db_desc.first).info;
+        const auto* ps=pipeline->GetStages()[u32(Shader::SwStage::Fragment)];
+        const u64 signature=u64(key.mrt_mask) | (u64(color_writes)<<8) |
+            (u64(regs.IsClipDisabled())<<16) | (u64(regs.depth_control.depth_write_enable)<<17) |
+            (u64(skip_cb_binding)<<18) | (u64(gbuffer_draw)<<19) |
+            (u64(di.size.width)<<32) | (u64(di.size.height)<<48);
+        static std::array<u64,64> reported{};
+        static size_t count=0;
+        if (count<reported.size() &&
+            std::find(reported.begin(),reported.begin()+count,signature)==reported.begin()+count) {
+            reported[count++]=signature;
+            std::printf("GoW3 scene role: vs %016llx ps %016llx depth %ux%u mrt %x color_writes %x skip_cb %d clip_disabled %d depth_write %d indices %u camera_candidate %d tracked %d ready %d\n",
+                (unsigned long long)pipeline->GetStage(Shader::SwStage::Vertex).pgm_hash,
+                (unsigned long long)(ps ? ps->pgm_hash : 0),di.size.width,di.size.height,
+                key.mrt_mask,color_writes,int(skip_cb_binding),int(regs.IsClipDisabled()),
+                int(regs.depth_control.depth_write_enable),regs.num_indices,int(gbuffer_draw),
+                int(camera_motion->HasCameraThisFrame()),int(camera_motion->Ready()));
+            std::fflush(stdout);
+        }
+    }
     if (gbuffer_draw) {
         camera_motion->OnGBufferPass(db_desc.first);
     }
@@ -1010,13 +1039,25 @@ void Rasterizer::DrawRecord(const GraphicsPipeline* pipeline, const PreparedDraw
     // gow3: the pass copying a finished frame to a display buffer; the previous draw's
     // target is that frame.
     const u32 display_vs=u32(pipeline->GetStage(Shader::SwStage::Vertex).pgm_hash);
-    const bool gow3_copy=display_vs==0x56d7530b || display_vs==0x3167b1ca;
+    const bool known_copy = display_vs == 0x56d7530b || display_vs == 0x3167b1ca;
+    const auto* fragment = pipeline->GetStages()[u32(Shader::SwStage::Fragment)];
+    const auto& display_viewport = regs.viewports[0];
+    const bool completed_scene = upscaler->SceneDisplayReady() && fragment &&
+        !fragment->images.empty() &&
+        UiComposition::NativeViewport(display_viewport.xscale * 2, display_viewport.yscale * 2);
+    const bool gow3_copy = known_copy || completed_scene;
     const bool display_copy = regs.color_buffers[0] &&
         FrameCapture::IsDisplayBuffer(regs.color_buffers[0].Address()) &&
         std::popcount(pipeline->GetGraphicsKey().mrt_mask & 0x7f)==1 && regs.num_indices<=6 &&
         (Gow3Settings::Get().upscaler!=Gow3Settings::UpscalerDlss || gow3_copy) &&
         !UiComposition::MovieShader(pipeline->GetStage(Shader::SwStage::Vertex).pgm_hash);
-    if (camera_motion->Enabled() && display_copy && !in_display_copy) {
+    // A second copy/UI pass must not clear an already consumed camera. With no
+    // new scene constants, OnDisplayPass would invalidate both cameras and keep
+    // the next real scene permanently in first-frame bootstrap.
+    const bool scene_boundary = display_copy && !in_display_copy &&
+        (Gow3Settings::Get().upscaler!=Gow3Settings::UpscalerDlss ||
+         camera_motion->HasCameraThisFrame());
+    if (camera_motion->Enabled() && scene_boundary) {
         scene_started = false;
         upscaler->BeforeFrameDisplay();
         camera_motion->OnDisplayPass(cb_descs[0].first);
@@ -1041,7 +1082,8 @@ void Rasterizer::DrawRecord(const GraphicsPipeline* pipeline, const PreparedDraw
         const auto& viewport = Regs().viewports[0];
         upscaler->OnDraw(pipeline->GetStage(Shader::SwStage::Vertex).pgm_hash,
                          cb_descs[0].first, db_desc.first,
-                         UiComposition::NativeViewport(viewport.xscale * 2, viewport.yscale * 2));
+                         UiComposition::NativeViewport(viewport.xscale * 2, viewport.yscale * 2),
+                         display_copy);
     }
     const PreparedDraw* draw_prepared = bind_prepared;
     // gow3: vertex and index buffers are resolved while the helper binds textures (their
@@ -1162,7 +1204,7 @@ void Rasterizer::DrawRecord(const GraphicsPipeline* pipeline, const PreparedDraw
     // gow3: jitter geometry drawn with the scene depth, not full-screen passes (a shifted
     // full-screen quad leaves an edge column unwritten).
     draw_jitter = {};
-    if (upscaler->Enabled() && db_desc.first && db_desc.first == camera_motion->Depth() &&
+    if (upscaler->Enabled() && camera_motion->Ready() && db_desc.first && db_desc.first == camera_motion->Depth() &&
         (regs.num_indices > 6 || regs.num_instances.NumInstances() > 1)) {
         draw_jitter = upscaler->Jitter();
     }
@@ -1299,7 +1341,7 @@ void Rasterizer::DrawIndirectRecord(const GraphicsPipeline* pipeline, bool is_in
     push_data.yoffset *= target_scale[1];
     pipeline->BindResources(set_writes, push_data);
     draw_jitter = {};
-    if (upscaler->Enabled() && db_desc.first && db_desc.first == camera_motion->Depth()) {
+    if (upscaler->Enabled() && camera_motion->Ready() && db_desc.first && db_desc.first == camera_motion->Depth()) {
         draw_jitter = upscaler->Jitter();
     }
     UpdateDynamicState(pipeline, is_indexed);
@@ -2337,7 +2379,7 @@ void Rasterizer::BindTextures(const Shader::Info& stage, const PreparedStage* pr
     // image (normalized sampling only; see Shader::ImageResource::needs_native).
     boost::container::small_vector<bool, 16> binding_proxy_ok;
     const bool sample_proxies = !Gow3Toggle::Disabled(Gow3Toggle::SampleSceneProxies) &&
-                                !on_helper && scene_targets->Reduced();
+                                !on_helper && !upscaler->NativeVideo() && scene_targets->Reduced();
 
     for (u32 image_index = 0; image_index < stage.images.size(); ++image_index) {
         const auto& image_desc = stage.images[image_index];
@@ -2676,7 +2718,8 @@ bool Rasterizer::BindTexturesFromSet(const Shader::Info& stage, const PreparedSt
         const auto& image = texture_cache.GetImage(entry.id);
         // Proxy entries need a current proxy; native entries of a proxied image go through
         // BindTextures, which may sample the proxy instead.
-        const bool proxies_on = !Gow3Toggle::Disabled(Gow3Toggle::SampleSceneProxies);
+        const bool proxies_on = !upscaler->NativeVideo() &&
+            !Gow3Toggle::Disabled(Gow3Toggle::SampleSceneProxies);
         if (image.backing != entry.backing || image.binding.needs_rebind ||
             image.binding.is_target || !texture_cache.IsUpToDate(entry.id) ||
             (entry.proxy ? !proxies_on ||
@@ -2721,6 +2764,12 @@ bool Rasterizer::BindTexturesFromSet(const Shader::Info& stage, const PreparedSt
 }
 
 RenderState Rasterizer::BeginRendering(const GraphicsPipeline* pipeline) {
+    // BindResources can leave image transitions queued (including alias bindings).
+    // Join its helper and publish those transitions before checking the old render
+    // scope. Otherwise a memo hit can restore an attachment layout invalidated by
+    // barriers which the caller flushes only after this method returns.
+    JoinBindHelper(this);
+    if (needs_barrier) runtime.FlushBarriers();
     // gow3: RenderStateMemo (see BeginMemo).
     const bool memo_on = !Gow3Toggle::Disabled(Gow3Toggle::RenderStateMemo) && !FrameCapture::Active();
     if (Gow3Stats::enabled && ((begin_memo_hits + begin_memo_misses) & 0x3FFFF) == 0x3FFFF) {
@@ -3094,6 +3143,14 @@ RenderState Rasterizer::BeginRenderingFull(const GraphicsPipeline* pipeline) {
         state.width = proxy.width;
         state.height = proxy.height;
         target_scale = {float(size.width) / 1920.0f, float(size.height) / 1080.0f};
+    }
+    if (color_redirected && !reduced) {
+        // Post/UI passes still compute texture coordinates from guest-sized
+        // constants. Their enlarged attachment needs the same inverse FragCoord
+        // mapping as scene proxies, including half-size guest attachments.
+        push_data.scene_size = SceneResolution::Pack({
+            u32(std::round(1920.0f * target_scale[0])),
+            u32(std::round(1080.0f * target_scale[1]))});
     }
     if (census_on) {
         std::array<const VideoCore::ImageInfo*, AmdGpu::NUM_COLOR_BUFFERS> colors{};

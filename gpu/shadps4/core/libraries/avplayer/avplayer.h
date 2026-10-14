@@ -7,6 +7,7 @@
 
 #include <cstdarg> // va_list
 #include <cstddef> // size_t
+#include <string_view>
 
 namespace Core::Loader {
 class SymbolsResolver;
@@ -291,5 +292,13 @@ enum class AvPlayerAvSyncMode {
 using AvPlayerLogCallback = int PS4_SYSV_ABI (*)(void* p, const char* format, va_list args);
 
 void RegisterLib(Core::Loader::SymbolsResolver* sym);
+/// Host renderer: video is active before its first UI/video draw is recorded.
+bool VideoPlaybackActive();
+/// Opt-in local replay selector. nullptr keeps the requested source unchanged.
+const char* SelectTestMovieSource(std::string_view path, const char* caller);
 
 } // namespace Libraries::AvPlayer
+
+// Parent's guest file translator can use the same selector for BSF/XVAG sources
+// demuxed by guest code instead of the host AvPlayer entry points.
+extern "C" const char* gow3_avplayer_test_source_path(const char* requested);

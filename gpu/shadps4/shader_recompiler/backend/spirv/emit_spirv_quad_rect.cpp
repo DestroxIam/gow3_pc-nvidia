@@ -3,7 +3,6 @@
 
 #include <sirit/sirit.h>
 #include "shader_recompiler/backend/spirv/emit_spirv_quad_rect.h"
-#include "shader_recompiler/runtime_info.h"
 
 namespace Shader::Backend::SPIRV {
 
@@ -12,8 +11,8 @@ using Sirit::Id;
 constexpr u32 SPIRV_VERSION_1_5 = 0x00010500;
 
 struct QuadRectListEmitter : public Sirit::Module {
-    explicit QuadRectListEmitter(const HwFragmentRuntimeInfo& fs_info_)
-        : Sirit::Module{SPIRV_VERSION_1_5}, fs_info{fs_info_} {
+    explicit QuadRectListEmitter(const AuxTessellationInterface& interface_)
+        : Sirit::Module{SPIRV_VERSION_1_5}, interface{interface_} {
         void_id = TypeVoid();
         bool_id = TypeBool();
         float_id = TypeFloat(32);
@@ -91,12 +90,16 @@ struct QuadRectListEmitter : public Sirit::Module {
             bary_coord[i] = OpSelect(float_id, is_edge_vertex[i], float_min_one, float_one);
         }
 
-        const auto interpolate = [&](Id v0, Id v1, Id v2) {
+        const auto interpolate = [&](Id type, u32 components, Id v0, Id v1, Id v2) {
             // return v0 * bary_coord.x + v1 * bary_coord.y + v2 * bary_coord.z;
-            const Id p0{OpVectorTimesScalar(vec4_id, v0, bary_coord[0])};
-            const Id p1{OpVectorTimesScalar(vec4_id, v1, bary_coord[1])};
-            const Id p2{OpVectorTimesScalar(vec4_id, v2, bary_coord[2])};
-            return OpFAdd(vec4_id, p0, OpFAdd(vec4_id, p1, p2));
+            const auto scale = [&](Id value, Id weight) {
+                return components == 1 ? OpFMul(type, value, weight)
+                                       : OpVectorTimesScalar(type, value, weight);
+            };
+            const Id p0{scale(v0, bary_coord[0])};
+            const Id p1{scale(v1, bary_coord[1])};
+            const Id p2{scale(v2, bary_coord[2])};
+            return OpFAdd(type, p0, OpFAdd(type, p1, p2));
         };
 
         // int vertex_index_id = is_edge_vertex[1] ? 1 : (is_edge_vertex[2] ? 2 : 0);
@@ -110,22 +113,25 @@ struct QuadRectListEmitter : public Sirit::Module {
 
         // gl_out[gl_InvocationID].gl_Position = gl_InvocationID == 3 ? pos3 :
         // gl_in[index].gl_Position;
-        const Id pos3{interpolate(pos[0], pos[1], pos[2])};
+        const Id pos3{interpolate(vec4_id, 4, pos[0], pos[1], pos[2])};
         const Id in_ptr{OpAccessChain(input_vec4, gl_in, index, Int(0))};
         const Id position{OpSelect(vec4_id, invocation_3, pos3, OpLoad(vec4_id, in_ptr))};
         OpStore(OpAccessChain(output_vec4, gl_out, invocation_id, Int(0)), position);
 
         // Set attributes
         for (int i = 0; i < inputs.size(); i++) {
+            const Id type = param_types[i];
+            const Id input_param = TypePointer(spv::StorageClass::Input, type);
+            const Id output_param = TypePointer(spv::StorageClass::Output, type);
             // vec4 in_paramN3 = interpolate(bary_coord, in_paramN[0], in_paramN[1], in_paramN[2]);
-            const Id v0{OpLoad(vec4_id, OpAccessChain(input_vec4, inputs[i], Int(0)))};
-            const Id v1{OpLoad(vec4_id, OpAccessChain(input_vec4, inputs[i], Int(1)))};
-            const Id v2{OpLoad(vec4_id, OpAccessChain(input_vec4, inputs[i], Int(2)))};
-            const Id in_param3{interpolate(v0, v1, v2)};
+            const Id v0{OpLoad(type, OpAccessChain(input_param, inputs[i], Int(0)))};
+            const Id v1{OpLoad(type, OpAccessChain(input_param, inputs[i], Int(1)))};
+            const Id v2{OpLoad(type, OpAccessChain(input_param, inputs[i], Int(2)))};
+            const Id in_param3{interpolate(type, param_components[i], v0, v1, v2)};
             // out_paramN[gl_InvocationID] = gl_InvocationID == 3 ? in_paramN3 : in_paramN[index];
-            const Id in_param{OpLoad(vec4_id, OpAccessChain(input_vec4, inputs[i], index))};
-            const Id out_param{OpSelect(vec4_id, invocation_3, in_param3, in_param)};
-            OpStore(OpAccessChain(output_vec4, outputs[i], invocation_id), out_param);
+            const Id in_param{OpLoad(type, OpAccessChain(input_param, inputs[i], index))};
+            const Id out_param{OpSelect(type, invocation_3, in_param3, in_param)};
+            OpStore(OpAccessChain(output_param, outputs[i], invocation_id), out_param);
         }
 
         OpReturn();
@@ -162,9 +168,12 @@ struct QuadRectListEmitter : public Sirit::Module {
         OpStore(OpAccessChain(output_vec4, gl_out, invocation_id, Int(0)), in_position);
 
         for (int i = 0; i < inputs.size(); i++) {
+            const Id type = param_types[i];
+            const Id input_param = TypePointer(spv::StorageClass::Input, type);
+            const Id output_param = TypePointer(spv::StorageClass::Output, type);
             // out_paramN[gl_InvocationID] = in_paramN[gl_InvocationID];
-            const Id in_param{OpLoad(vec4_id, OpAccessChain(input_vec4, inputs[i], index))};
-            OpStore(OpAccessChain(output_vec4, outputs[i], invocation_id), in_param);
+            const Id in_param{OpLoad(type, OpAccessChain(input_param, inputs[i], index))};
+            OpStore(OpAccessChain(output_param, outputs[i], invocation_id), in_param);
         }
 
         OpReturn();
@@ -190,7 +199,9 @@ struct QuadRectListEmitter : public Sirit::Module {
 
         // out_paramN = in_paramN[index];
         for (int i = 0; i < inputs.size(); i++) {
-            const Id param{OpLoad(vec4_id, OpAccessChain(input_vec4, inputs[i], index))};
+            const Id type = param_types[i];
+            const Id input_param = TypePointer(spv::StorageClass::Input, type);
+            const Id param{OpLoad(type, OpAccessChain(input_param, inputs[i], index))};
             OpStore(outputs[i], param);
         }
 
@@ -252,16 +263,15 @@ private:
         } else {
             gl_per_vertex = AddOutput(gl_per_vertex_type);
         }
-        outputs.reserve(fs_info.num_inputs);
-        for (int i = 0; i < fs_info.num_inputs; i++) {
-            const auto& input = fs_info.inputs[i];
-            if (input.IsDefault()) {
-                continue;
-            }
+        outputs.reserve(inputs.size());
+        u32 param = 0;
+        for (u32 location = 0; location < interface.components.size(); ++location) {
+            if (!interface.components[location]) continue;
+            const Id type = param_types[param++];
             outputs.emplace_back(AddOutput(model == spv::ExecutionModel::TessellationControl
-                                               ? TypeArray(vec4_id, Int(4))
-                                               : vec4_id));
-            Decorate(outputs.back(), spv::Decoration::Location, input.param_index);
+                                               ? TypeArray(type, Int(4))
+                                               : type));
+            Decorate(outputs.back(), spv::Decoration::Location, location);
         }
     }
 
@@ -275,20 +285,21 @@ private:
         }
         const Id gl_per_vertex_array{TypeArray(gl_per_vertex_type, Constant(uint_id, 32U))};
         gl_in = AddInput(gl_per_vertex_array);
-        const Id float_arr{TypeArray(vec4_id, Int(32))};
-        inputs.reserve(fs_info.num_inputs);
-        for (int i = 0; i < fs_info.num_inputs; i++) {
-            const auto& input = fs_info.inputs[i];
-            if (input.IsDefault()) {
-                continue;
-            }
-            inputs.emplace_back(AddInput(float_arr));
-            Decorate(inputs.back(), spv::Decoration::Location, input.param_index);
+        for (u32 location = 0; location < interface.components.size(); ++location) {
+            const u32 components = interface.components[location];
+            if (!components) continue;
+            const Id type = components == 1 ? float_id : TypeVector(float_id, components);
+            param_types.push_back(type);
+            param_components.push_back(components);
+            inputs.emplace_back(AddInput(TypeArray(type, Int(32))));
+            Decorate(inputs.back(), spv::Decoration::Location, location);
         }
     }
 
 private:
-    HwFragmentRuntimeInfo fs_info;
+    AuxTessellationInterface interface;
+    std::vector<Id> param_types;
+    std::vector<u32> param_components;
     Id main;
     Id void_id;
     Id bool_id;
@@ -319,8 +330,9 @@ private:
     std::vector<Id> interfaces;
 };
 
-std::vector<u32> EmitAuxilaryTessShader(AuxShaderType type, const HwFragmentRuntimeInfo& fs_info) {
-    QuadRectListEmitter ctx{fs_info};
+std::vector<u32> EmitAuxilaryTessShader(AuxShaderType type,
+                                     const AuxTessellationInterface& interface) {
+    QuadRectListEmitter ctx{interface};
     switch (type) {
     case AuxShaderType::RectListTCS:
         ctx.EmitRectListTCS();

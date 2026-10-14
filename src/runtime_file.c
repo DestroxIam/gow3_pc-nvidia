@@ -94,6 +94,12 @@ void runtime_file_configure(const char *app0,const char *user) {
 /* Resolve a guest path to a host path; returns 0 or a host errno. */
 static int translate(const char *guest,char *out,size_t size) {
     if (!guest || !*guest) return ENOENT;
+#ifdef GOW3_AVPLAYER_TEST_HOOK
+    /* Opt-in diagnostic replay; normal launches never set its environment key. */
+    extern const char *gow3_avplayer_test_source_path(const char *);
+    const char *replay=gow3_avplayer_test_source_path(guest);
+    if (replay) guest=replay;
+#endif
     char buffer[1024];
     if (guest[0]!='/') snprintf(buffer,sizeof(buffer),"/app0/%s",guest);
     else snprintf(buffer,sizeof(buffer),"%s",guest);

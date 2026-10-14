@@ -444,10 +444,12 @@ void EmitContext::DefineInputs() {
 
         for (s32 i = 0; i < num_inputs; i++) {
             const auto& input = runtime_info.hw.fs.inputs[i];
-            if (input.IsDefault()) {
+            const IR::Attribute param = IR::Attribute::Param0 + i;
+            // Register interpolation slots can outlive the shader that used them.
+            // An unread slot must not demand a varying from the preceding stage.
+            if (input.IsDefault() || !info.loads.GetAny(param)) {
                 continue;
             }
-            const IR::Attribute param = IR::Attribute::Param0 + i;
             const u32 num_components = info.loads.NumComponents(param);
             const auto [primary, auxiliary] = info.fs_interpolation[i];
             const Id type = F32[num_components];

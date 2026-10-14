@@ -34,9 +34,9 @@
 
 namespace Serialization {
 /* You should increment versions below once corresponding serialization scheme is changed. */
-static constexpr u32 ShaderBinaryVersion = 7u; // gow3: interpolated integer fix (Pascal)
-static constexpr u32 ShaderMetaVersion = 7u; // gow3: ImageResource::needs_native
-static constexpr u32 PipelineKeyVersion = 5u; // gow3: Info layout (ImageResource::needs_native)
+static constexpr u32 ShaderBinaryVersion = 9u; // gow3: retain shader interface metadata
+static constexpr u32 ShaderMetaVersion = 8u; // gow3: persistent loads/stores for auxiliary linking
+static constexpr u32 PipelineKeyVersion = 7u; // gow3: auxiliary interface follows VS exports
 } // namespace Serialization
 
 namespace Vulkan {
@@ -1376,6 +1376,8 @@ void Info::Serialize(Serialization::Archive& ar) const {
     Serialization::Writer info{ar};
 
     info.Write(this, sizeof(InfoPersistent));
+    info.Write(loads.flags.data(), sizeof(loads.flags));
+    info.Write(stores.flags.data(), sizeof(stores.flags));
     info.Write(flattened_ud_buf);
     srt_info.Serialize(ar);
 }
@@ -1384,6 +1386,8 @@ bool Info::Deserialize(Serialization::Archive& ar) {
     Serialization::Reader info{ar};
 
     info.Read(this, sizeof(Shader::InfoPersistent));
+    info.Read(loads.flags.data(), sizeof(loads.flags));
+    info.Read(stores.flags.data(), sizeof(stores.flags));
     info.Read(flattened_ud_buf);
 
     return srt_info.Deserialize(ar);

@@ -127,6 +127,15 @@ add_host_shader(buffer_multi_copy.comp buffer_multi_copy_comp)
 add_host_shader(depth_resample.frag depth_resample_frag)
 add_host_shader(depth_resample.frag depth_stencil_resample_frag HAS_STENCIL=1)
 add_host_shader(depth_resample.frag depth_stencil_bits_frag STENCIL_BITS=1)
+add_host_shader(depth_resample.frag depth_resample_ms_frag SRC_MSAA=1)
+add_host_shader(depth_resample.frag depth_stencil_resample_ms_frag SRC_MSAA=1 HAS_STENCIL=1)
+add_host_shader(depth_resample.frag depth_stencil_bits_ms_frag SRC_MSAA=1 STENCIL_BITS=1)
+add_host_shader(scene_color_resample_ms.frag scene_color_resample_ms_frag)
+add_host_shader(scene_color_resample_ms.frag scene_color_resample_ms_uint_frag COLOR_UINT=1)
+add_host_shader(scene_color_resample_ms.frag scene_color_resample_ms_sint_frag COLOR_SINT=1)
+add_host_shader(../../../../tests/shaders/scene_ms_seed.frag scene_ms_test_seed_frag)
+add_host_shader(../../../../tests/shaders/scene_ms_seed.frag scene_ms_test_seed_stencil_frag EXPORT_STENCIL=1)
+add_host_shader(../../../../tests/shaders/scene_ms_probe.comp scene_ms_test_probe_comp)
 add_host_shader(camera_motion.comp camera_motion_debug_comp DEBUG_OVERLAY=1)
 foreach(BPP IN ITEMS 8 16 32 64 96 128)
     add_host_shader(tiling.comp tiling_micro_${BPP}_comp BITS_PER_PIXEL=${BPP} IS_MACRO_TILED=0)
@@ -203,6 +212,7 @@ if (WIN32)
         ../src/isa_rewrite.c ../src/isa_emulate.c
         ../packaging/windows/gow3-probe.rc)
     set_target_properties(gow3-probe PROPERTIES C_STANDARD 11 C_EXTENSIONS OFF)
+    target_compile_definitions(gow3-probe PRIVATE GOW3_AVPLAYER_TEST_HOOK)
     target_compile_options(gow3-probe PRIVATE $<$<COMPILE_LANGUAGE:C>:-Wall -Wextra -Werror>)
     target_include_directories(gow3-probe PRIVATE .. ../src)
     target_link_libraries(gow3-probe PRIVATE gow3gpu atrac9 onecore bcrypt ws2_32 -pthread)
@@ -358,6 +368,24 @@ target_compile_options(scene-resolution-test PRIVATE -UNDEBUG -fPIC)
 set_source_files_properties(../tests/test_scene_resolution.cpp PROPERTIES
     COMPILE_OPTIONS "-fvisibility=hidden;-fvisibility-inlines-hidden")
 target_link_libraries(scene-resolution-test PRIVATE gow3gpu)
+add_executable(scene-targets-safety-test EXCLUDE_FROM_ALL
+    ../tests/test_scene_targets_safety.cpp ../tests/scene_headless_context.cpp
+    ../tests/scene_gpu_runtime_stubs.cpp)
+target_include_directories(scene-targets-safety-test PRIVATE shim shadps4 ${SHADER_INCLUDE} third_party/gcn/include)
+# Vulkan-Hpp changes dispatcher layout under NDEBUG. Match gow3gpu's build
+# profile; scene_test_assert.h keeps checks active independently.
+target_compile_options(scene-targets-safety-test PRIVATE -fPIC)
+# Capture validation from the production callback's installation before CreateDevice,
+# rather than installing a second messenger after Instance construction.
+if (WIN32 OR (UNIX AND NOT APPLE))
+    target_compile_definitions(scene-targets-safety-test PRIVATE SCENE_WRAP_DEBUG_CALLBACK)
+    target_link_options(scene-targets-safety-test PRIVATE
+        "LINKER:--wrap=_ZN6Vulkan19CreateDebugCallbackEN2vk8InstanceE")
+endif()
+set_source_files_properties(../tests/test_scene_targets_safety.cpp PROPERTIES
+    COMPILE_OPTIONS "-fvisibility=hidden;-fvisibility-inlines-hidden")
+target_link_libraries(scene-targets-safety-test PRIVATE gow3gpu)
+add_dependencies(scene-targets-safety-test host_shaders)
 add_executable(taa-shader-test EXCLUDE_FROM_ALL ../tests/test_taa_shader.cpp ../tests/test_gpu_runtime_stubs.cpp)
 target_include_directories(taa-shader-test PRIVATE shim shadps4 ${SHADER_INCLUDE} third_party/gcn/include)
 target_compile_options(taa-shader-test PRIVATE -UNDEBUG -fPIC)

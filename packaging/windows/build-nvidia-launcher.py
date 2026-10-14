@@ -4,7 +4,7 @@ from pathlib import Path
 import subprocess,sys
 root=Path(__file__).resolve().parents[2]
 hidden=('argparse','base64','collections','configparser','hashlib','json','math','re','shutil','struct','tempfile',
-        'xml.etree.ElementTree','urllib.request','ctypes.wintypes','importlib.util','gow3_lang','gow3_dlss_control',
+        'dataclasses','iced_x86','xml.etree.ElementTree','urllib.request','ctypes.wintypes','importlib.util','gow3_lang','gow3_dlss_control',
         'gow3_redesign','game_layout','button_icons','gow3_vulkan','gow3_assets')
 command=[sys.executable,'-m','PyInstaller','--noconfirm','--clean','--log-level','WARN','--windowed',
          '--name','God of War III','--icon',str(root/'launcher/gow3.ico'),

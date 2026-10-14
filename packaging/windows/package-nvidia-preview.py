@@ -3,16 +3,26 @@
 from pathlib import Path
 import argparse,zipfile,shutil,configparser,json,hashlib
 from publication_policy import allowed_publication, allowed_source, relative_path, renderer_sync_report, update_checksum
+from runtime_provenance import read_object, verified_stage, sha256
 root=Path(__file__).resolve().parents[2]
 parser=argparse.ArgumentParser()
 parser.add_argument('--source-root',type=Path,default=root)
 parser.add_argument('--base-zip',type=Path,required=True)
 parser.add_argument('--runtime-root',type=Path,required=True)
 parser.add_argument('--native-runtime',type=Path,required=True)
-parser.add_argument('--native-effects-runtime',type=Path,help='Parent-owned stable full effects runtime; never inferred from a capture installation')
+parser.add_argument('--native-effects-runtime',type=Path,required=True,help='Parent-owned stable full effects runtime; never inferred from a capture installation')
 parser.add_argument('--renderer-source',type=Path,help='Verify renderer/shader/test synchronization against the parent source before packaging')
+parser.add_argument('--receipt',type=Path,required=True,help='Parent test receipt binding both binary and source-manifest hashes')
 parser.add_argument('--output',type=Path,required=True)
-args=parser.parse_args();output=args.output.resolve();output.mkdir(parents=True,exist_ok=True)
+args=parser.parse_args()
+receipt=read_object(args.receipt)
+if receipt.get('native_sr_gameplay') is not True:raise RuntimeError('Native SR gameplay receipt required')
+native=args.native_runtime.resolve();normal=args.runtime_root.resolve()
+effects=args.native_effects_runtime.resolve()
+pure_identity=verified_stage(native,receipt)
+effects_identity=verified_stage(effects,receipt,
+    'effects_source_manifest_sha256',effects=True)
+output=args.output.resolve();output.mkdir(parents=True,exist_ok=True)
 root=args.source_root.resolve()
 stage=output/'gow3-windows-nvidia'
 if stage.exists() and any(stage.iterdir()):raise RuntimeError('Use a fresh output directory; a prior staging tree must not contaminate a package')
@@ -60,10 +70,8 @@ def runtime_tree(source,destination):
         if not allowed(relative) or relative.name in {'source-manifest.json','renderer-build.json','OptiScaler.ini'}:continue
         if path.suffix.lower() not in {'.dll','.exe','.txt','.md'}:continue
         target=destination/relative;target.parent.mkdir(parents=True,exist_ok=True);shutil.copy2(path,target)
-native=args.native_runtime.resolve();normal=args.runtime_root.resolve()
-effects=args.native_effects_runtime.resolve() if args.native_effects_runtime else normal/'bin-dlss5'
 runtime_tree(native,stage/'bin-native-dlss')
-runtime_tree(effects if args.native_effects_runtime else native,stage/'bin-native-effects')
+runtime_tree(effects,stage/'bin-native-effects')
 runtime_tree(normal/'bin-dlss5',stage/'bin-dlss5')
 for name in ('winmm.dll',):shutil.copy2(effects/name,stage/'bin-native-effects'/name)
 for path in (effects/'OptiScaler').rglob('*'):
@@ -83,7 +91,14 @@ for folder in ('bin-dlss5','bin-native-effects'):
     if license_path.exists():shutil.copy2(license_path,stage/folder/'OptiScaler/Streamline-LICENSE.txt')
     shutil.copy2(root/'patches/optiscaler/LICENSE',stage/folder/'OptiScaler/LICENSE-GPL3.txt')
 for folder in ('bin-native-dlss','bin-native-effects'):
-    info={'source_repository':'https://github.com/DestroxIam/gow3_pc-nvidia','upstream_commit':'b907d8a9f2324ba5f514fbfe7de803e027c6ca26',
+    identity=pure_identity if folder=='bin-native-dlss' else effects_identity
+    origin=native if folder=='bin-native-dlss' else effects
+    if sha256(origin/'source-manifest.json')!=identity['source_manifest_sha256']:
+        raise RuntimeError('Source manifest changed during staging')
+    for name,field in [('gow3-probe.exe','probe_sha256')]+([('winmm.dll','optiscaler_sha256')] if folder=='bin-native-effects' else []):
+        if sha256(stage/folder/name)!=identity[field]:raise RuntimeError('Staged binary changed after receipt validation: '+name)
+    info={**identity,
+          'source_repository':'https://github.com/DestroxIam/gow3_pc-nvidia',
           'native_dlss':True,'probe_sha256':hashlib.sha256((stage/folder/'gow3-probe.exe').read_bytes()).hexdigest()}
     if folder=='bin-native-effects':
         info['optiscaler_sha256']=hashlib.sha256((stage/folder/'winmm.dll').read_bytes()).hexdigest()
@@ -91,12 +106,15 @@ for folder in ('bin-native-dlss','bin-native-effects'):
         candidate=json.loads(marker.read_text(encoding='utf-8')) if args.native_effects_runtime and marker.is_file() else {}
         if not isinstance(candidate,dict):raise RuntimeError('Malformed parent effects runtime manifest')
         if candidate.get('native_nr_after_sr') is True:
+            if receipt.get('native_nr_after_sr') is not True:raise RuntimeError('Native NR capability is not approved by the tested receipt')
             if any(not isinstance(candidate.get(key),str) or candidate[key].lower()!=info[key]
                    for key in ('probe_sha256','optiscaler_sha256')):
                 raise RuntimeError('Parent-validated NR runtime hashes do not match staged binaries')
             if any((stage/folder/name).stat().st_size==0 for name in ('gow3-probe.exe','winmm.dll')):
                 raise RuntimeError('Empty binary cannot carry the parent-validated NR capability')
             info['native_nr_after_sr']=True  # Carry explicit parent validation; never infer it from source/tests.
+    # Ship only public identity; source_manifest_sha256 refers to the original tested stage manifest.
+    (stage/folder/'source-manifest.json').write_text(json.dumps(info,indent=2),encoding='utf-8')
     (stage/folder/'renderer-build.json').write_text(json.dumps(info,indent=2))
 (stage/'gow3.ini').write_text('''# Clean preview defaults, not a player configuration
 upscaler=off

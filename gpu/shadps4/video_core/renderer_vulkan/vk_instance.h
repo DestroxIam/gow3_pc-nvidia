@@ -49,6 +49,10 @@ public:
     bool IsShaderFloat16Enabled() const {
         return vk12_features.shaderFloat16;
     }
+    /// CreateDevice enables this feature exactly when the physical device supports it.
+    bool IsSampleRateShadingEnabled() const {
+        return features.sampleRateShading;
+    }
     bool IsSubgroupSizeControlEnabled() const {
         return vk13_features.subgroupSizeControl;
     }

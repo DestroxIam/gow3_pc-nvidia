@@ -41,6 +41,11 @@ int PS4_SYSV_ABI AvPlayer::OpenFile(void* handle, const char* filename) {
 
     const auto open = self->m_init_data_original.file_replacement.open;
     const auto ptr = self->m_init_data_original.file_replacement.object_ptr;
+    if (filename) {
+        if (const char* replay = SelectTestMovieSource(filename, "file-replacement.open")) {
+            filename = replay;
+        }
+    }
     return open(ptr, filename);
 }
 
@@ -105,6 +110,10 @@ s32 AvPlayer::AddSource(std::string_view path) {
 }
 
 s32 AvPlayer::AddSourceEx(std::string_view path, AvPlayerSourceType source_type) {
+    // Shared by both public AddSource entry points and direct implementation calls.
+    if (const char* replay = SelectTestMovieSource(path, "AvPlayer::AddSourceEx")) {
+        path = replay;
+    }
     if (source_type == AvPlayerSourceType::Unknown) {
         source_type = GetSourceType(path);
     }
