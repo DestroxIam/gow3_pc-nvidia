@@ -38,9 +38,11 @@ Keep the open-source `nvngx.dll_dlssnr.dll` forwarder beside it; these are diffe
 
 ### Gated native NR AFTER-SR
 
-The parent reports that AFTER-SR NR candidate `23fc` sustained one-pass execution on RTX 5070 in Tomb of Ares with the Performance preset and FG disabled. Evidence includes more than 1,200 native SR evaluations after loading together with fresh NR timing messages. Reported NR processing totals were 9.73 and 10.12 ms, with model portions of 7.39 and 8.21 ms. These are diagnostic samples, not an FPS benchmark, a timing guarantee or whole-campaign validation. Menu execution was also observed.
+The parent reports limited gameplay validation on RTX 5070 using renderer `30bf…` and OptiScaler `90c9…`: native SR and AFTER-SR NR ran, and NVIDIA FG 2× with one NR pass produced fresh SDK frame/status messages. Live Performance → Quality → Performance queue retirement was also checked. This is not whole-campaign validation or physical validation of RTX 30/40.
 
-A live change to Quality currently recreates the D3D12 queue: the NR history guard then suppresses NR with `history belongs to another D3D12queue`, while SR continues. The queue/history lifecycle fix remains under investigation. Pure-SR preset-change results therefore do not establish equivalent NR preset-change support. FG 2× + NR testing is in progress; no combination result is claimed yet. Final acceptance and the UI's pending wording remain unchanged until the parent reviews the completed tests. RTX 30/40, extra passes and other visual presets remain physically unvalidated or experimental. NR adds inference cost after reconstruction; it does not itself promise more FPS.
+Stationary diagnostic samples were 52–53 rendered FPS / about 104–106 SDK/generated-rate estimate at model scale 25%, and 44–47 / about 88–94 at 50%. These estimates are not physical displayed-frame measurements or controlled benchmarks. The test was windowed with a 4K SR target on a 1440p monitor; this does not prove 4K physical presentation. NR adds GPU inference cost. Final deployment and continuous stability acceptance remain parent-owned.
+
+Only the specifically approved, hash-matching runtime may advertise optional `native_nr_fg_tested_multipliers: [2]`. The profile reports `fg_nr_combination_tested` only for native NVIDIA FG 2× plus one NR pass. Other multipliers/providers, capture mode and extra passes remain unvalidated. This does not validate every model scale, visual preset or GPU. Old markers without this field keep the combination unvalidated.
 
 The launcher enables this path only when `bin-native-effects/renderer-build.json` contains all three fields:
 
@@ -63,13 +65,13 @@ bin-native-effects/OptiScaler/nvngx.dll_dlssnr.dll
 
 Both must exist and be nonempty. An otherwise verified build with a requested NR profile fails preflight explicitly if these files are missing. Restore the recommended profile to disable NR without supplying the model. The selected UI state and launch header do not prove model execution; verify the current run's SDK messages and NR timing/evaluation messages in `user/NVIDIA.log`.
 
-With native DLSS/DLAA and NR enabled, the runtime is `bin-native-effects` even when FG is off. The generated mod profile uses the DLSS_on12 bridge (`VulkanUpscaler=dlss_12`), `VulkanInterop/InputsInGeneral=true`, and `DlssNr/NativeFrameGenerationOnly=true`. Native motion/input/upscaler/depth-finder flags are false and `RunBeforeSR=false`. It retains the user's visual settings, defaults to one pass, and records Info logs (`LogLevel=2`). FG-off sets both `FGInput` and `FGOutput` to `nofg`; FG+NR may be selected experimentally but has not been validated. Disable FG to reproduce the tested path. RTX 30/40 require the explicit experimental option and remain physically unvalidated.
+With native DLSS/DLAA and NR enabled, the runtime is `bin-native-effects` even when FG is off. The generated mod profile uses the DLSS_on12 bridge (`VulkanUpscaler=dlss_12`), `VulkanInterop/InputsInGeneral=true`, and `DlssNr/NativeFrameGenerationOnly=true`. Native motion/input/upscaler/depth-finder flags are false and `RunBeforeSR=false`. It retains the user's visual settings, defaults to one pass, and records Info logs (`LogLevel=2`). FG-off sets both `FGInput` and `FGOutput` to `nofg`; FG+NR may be selected experimentally. Only a matching approved marker/receipt can identify the limited 2×/one-pass test; other combinations remain unvalidated. RTX 30/40 require the explicit experimental option and remain physically unvalidated.
 
 The mod's pinned guide specifies driver 616.56 or newer for its NR path. DLSS/DLAA alone do not use the separate NR model. The correct runtime and older-GPU performance vary; RTX 30/40 NR and MFG extensions were not physically validated by this fork.
 
 ## Frame generation and counters
 
-Select NVIDIA frame generation and a multiplier. 2× was observed with the native path on RTX 5070. 3×–6× are experimental on this path. The mod's left counter shows presented/generated performance versus base; the port's right counter reflects engine frames. The multiplier does not promise a matching increase in measured FPS. The Home mod overlay and loss of focus can suspend generation.
+Select NVIDIA frame generation and a multiplier. 2× with native SR + NR in one pass was observed on RTX 5070 with the approved hashes. 3×–6× remain unvalidated on this path. The mod's left counter shows presented/generated performance versus base; the port's right counter reflects engine frames. The multiplier does not promise a matching increase in measured FPS. The Home mod overlay and loss of focus can suspend generation.
 
 ## Portability and return
 

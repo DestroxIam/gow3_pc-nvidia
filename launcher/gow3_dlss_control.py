@@ -97,7 +97,8 @@ def _runtime_hash(path, size, modified, changed):
 def native_nr_capability(port=None, refresh=False):
     """Opt-in build gate, not a claim that every GPU/preset/FG combination was tested."""
     result = {'verified_build':False, 'available':False, 'reason':'Native NR AFTER-SR requires a verified runtime manifest.',
-              'model_present':False, 'forwarder_present':False, 'optiscaler_sha256':None, 'probe_sha256':None}
+              'model_present':False, 'forwarder_present':False, 'optiscaler_sha256':None, 'probe_sha256':None,
+              'native_nr_fg_tested_multipliers':[]}
     if port is None: return result
     runtime = Path(port)/'bin-native-effects'
     try:
@@ -118,6 +119,8 @@ def native_nr_capability(port=None, refresh=False):
                 result['reason'] = f'Native NR suspended: {name} does not match the verified runtime hash ({field}).'
                 return result
         result['verified_build'] = True
+        tested=marker.get('native_nr_fg_tested_multipliers',[])
+        result['native_nr_fg_tested_multipliers']=[2] if isinstance(tested,list) and any(type(v) is int and v==2 for v in tested) else []
         for field, name in (('model_present','nvngx_dlssnr.dll'), ('forwarder_present','nvngx.dll_dlssnr.dll')):
             file = runtime/'OptiScaler'/name
             result[field] = file.is_file() and file.stat().st_size>0
@@ -126,7 +129,7 @@ def native_nr_capability(port=None, refresh=False):
         if missing:
             result['reason'] = 'Native NR requires user-provided model / forwarder in bin-native-effects/OptiScaler: ' + ', '.join(missing)
         else:
-            result.update(available=True, reason='Native NR AFTER-SR available for experimental testing; one pass observed in the menu on RTX 5070 without FG. Gameplay SDK/NR execution is not yet confirmed.')
+            result.update(available=True, reason='Native NR AFTER-SR runtime hashes verified and user model present. Confirm SDK/NR execution in this run; other passes/presets remain experimental.')
     except (OSError, ValueError) as error:
         result['reason'] = 'Native NR suspended: runtime capability could not be verified (' + str(error) + ').'
     return result
@@ -146,7 +149,9 @@ def effective_profile(settings, port=None):
             'nr_requested':p['dlss5_enabled'], 'nr_enabled':nr, 'nr_suspended':p['dlss5_enabled'] and native and not native_nr,
             'nr_stage':'after_sr' if native_nr else ('capture' if nr else None), 'native_nr_capability':capability,
             'nr_passes':p['nvidia_nr_passes'] if nr else None,
-            'fg_nr_combination_tested':False if nr and p['dlssg_mode']!='off' else None,
+            'fg_nr_combination_tested':bool(native_nr and p['nvidia_fg_provider']=='dlssg' and
+                p['dlssg_mode']=='2x' and p['nvidia_nr_passes']=='1' and
+                2 in capability['native_nr_fg_tested_multipliers']) if nr and p['dlssg_mode']!='off' else None,
             'fg_provider':p['nvidia_fg_provider'] if p['dlssg_mode']!='off' else None, 'fg_mode':p['dlssg_mode']}
 
 def profile_summary(settings, port=None):
@@ -157,7 +162,7 @@ def profile_summary(settings, port=None):
             'off':'DLSS e DLAA desligados.'}[mode]
     dims = profile['dimensions']
     if dims:
-        text += f" {dims['input'][0]} × {dims['input'][1]} interno → {dims['output'][0]} × {dims['output'][1]} final."
+        text += f" {dims['input'][0]} × {dims['input'][1]} interno → {dims['output'][0]} × {dims['output'][1]} alvo da imagem. A resolução apresentada pelo FG não foi medida."
     elif mode!='off':
         text += ' Compatibilidade processa a imagem pronta; a resolução interna não é calculada por esta guia.'
     return text + ' Aplicado na próxima abertura; confirme a execução no registro do jogo.'
@@ -178,9 +183,11 @@ def nr_control_state(settings, port, name):
             text='NR AFTER-SR: RTX 30/40 não foram fisicamente validadas; marque o teste experimental para habilitar.'
         else:
             text=('NR AFTER-SR selecionado para a próxima abertura.' if selected else 'NR AFTER-SR disponível; desligado.')
-            text+=' Uma passada foi observada no menu na RTX 5070 sem FG. Execução SDK/NR em gameplay ainda não confirmada. Mais passadas/presets são experimentais. '
+            text+=' Uma passada é o perfil de teste. Confirme SDK/NR no registro desta partida; mais passadas/presets são experimentais. '
             text+='A inferência adiciona custo de GPU; não garante aumento de FPS. BEFORE-SR permanece bloqueado.'
-            if p['dlssg_mode']!='off': text+=' FG + NR ainda não validado; desligue FG para reproduzir o perfil testado.'
+            if p['dlssg_mode']!='off':
+                text+=(' FG 2× + NR em uma passada foi observado no runtime aprovado; isso não valida todos os presets/escalas ou GPUs.'
+                       if profile['fg_nr_combination_tested'] else ' Esta combinação FG + NR não foi validada; não extrapole o teste de 2× com uma passada.')
             if h['generation']<50: text+=' RTX 30/40: teste experimental, sem validação física.'
     else:
         text=('NR de Compatibilidade selecionado para a próxima abertura · experimental; requer modelo separado.'

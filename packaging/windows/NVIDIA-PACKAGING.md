@@ -128,7 +128,7 @@ run. This task never invoked `--apply`, made a production package or uploaded fi
 
 The private installer accepts `--upstream-stage` and `--upstream-manifest`.
 For the current parent-owned asset these point to `work/upstream-2.1.8-stage/gow3-windows`
-and `work/upstream-2.1.8-base-manifest.json`. The parent verified the official ZIP
+and `work/upstream-2.1.8-base-verified.json`. The parent verified the official ZIP
 SHA-256 `3086d2c1b1c367630379763a217969babd85ccf1d543269f004009f39ab02cc0`.
 The receipt also needs `upstream_base_manifest_sha256`, covering the exact base
 inventory bytes. Every inventoried asset hash and the resolved upstream tag/commit
@@ -164,3 +164,31 @@ keep the existing separate NVIDIA source configurator for this staged workflow.
 For a frozen NVIDIA frontend, rebuild the fork launcher from the integrated source:
 its PyInstaller recipe now explicitly includes `iced_x86` and `dataclasses` for the
 2.1.8 ISA rewrite. No official/fork executable was launched or rebuilt by this task.
+
+## Frozen launcher dependency and role verification
+
+Build with `--dependency-dir` pointing to the parent-supplied project-local
+`work/nvidia-freeze-deps` target. The build script never invokes pip or changes global
+Python/environment configuration. Mandatory imports and native extensions are checked
+before freezing; any PyInstaller ERROR/FATAL message fails even when its exit code is
+zero. The complete probe imports include graphics_options, isa_rewrite, patches,
+prepare, control and launcher. Pillow and iced-x86 metadata/native extensions and
+Pillow/iced-x86/PyInstaller/Python license notices are included.
+
+`--verify-only` checks an already built root through `--script`, without invoking
+run.py, a game, GPU rendering or the GUI. It exercises a native instruction decode,
+Pillow image/font loading, confirms native module origins within `_internal`, and
+compares relocated-code signatures with the current 2.1.8 NVIDIA source. Acceptance
+is saved as `freeze-validation.json`, with the root executable SHA and portable
+module/license identity. An unsuccessful freeze/verification leaves no acceptance
+marker. This public freeze does not block the private installer using the already
+verified official base.
+
+The optional native NR+FG receipt/marker field is
+`native_nr_fg_tested_multipliers: [2]`. The installer carries only this supported
+multiplier from the approved receipt; the portable packager requires it in both
+receipt and hash-matching capability marker. It never promotes 3×–6× or extra passes.
+The effective profile calls the combination tested only for native DLSSG 2× and one
+NR pass, with the existing binary/model gates. Current-run SDK execution is still a
+separate observation; the flag does not prove every preset/GPU or physical display
+rate/resolution.

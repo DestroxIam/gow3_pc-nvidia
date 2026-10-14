@@ -19,6 +19,12 @@ def json_digest(value):
                                      ensure_ascii=True).encode()).hexdigest()
 
 
+def tested_nr_fg_multipliers(record):
+    values=record.get('native_nr_fg_tested_multipliers',[])
+    return [2] if record.get('native_nr_after_sr') is True and isinstance(values,list) and any(
+        type(v) is int and v==2 for v in values) else []
+
+
 def read_object(path):
     value = json.loads(Path(path).read_text(encoding='utf-8'))
     if not isinstance(value, dict):

@@ -167,7 +167,7 @@ class PortablePackageTest(unittest.TestCase):
                 put(base,'OptiScaler.ini',b'[DlssNr]\nEnabled=true\n')
                 put(base,'OptiScaler/nvngx_dlssnr.dll',b'proprietary model excluded')
                 put(base,'OptiScaler/nvngx.dll_dlssnr.dll',b'forwarder')
-            marker={'native_nr_after_sr':True,'probe_sha256':hashlib.sha256(b'new probe').hexdigest(),
+            marker={'native_nr_after_sr':True,'native_nr_fg_tested_multipliers':[2,6],'probe_sha256':hashlib.sha256(b'new probe').hexdigest(),
                     'optiscaler_sha256':hashlib.sha256(b'new validated proxy').hexdigest()}
             put(effects,'renderer-build.json',json.dumps(marker).encode())
             recipe={'commands':[['cmake','--build','out/native']],'toolchain':{'compiler':'fixture compiler 1.0'}}
@@ -179,7 +179,7 @@ class PortablePackageTest(unittest.TestCase):
                 'overlay_sha256':'1'*64,'source_tree_sha256':'2'*64,'build_recipe':recipe}
             effects_identity={**identity,'optiscaler_sha256':marker['optiscaler_sha256'],'optiscaler_source':opti}
             put(effects,'source-manifest.json',json.dumps(effects_identity).encode())
-            receipt={'native_sr_gameplay':True,'native_nr_after_sr':True,
+            receipt={'native_sr_gameplay':True,'native_nr_after_sr':True,'native_nr_fg_tested_multipliers':[2],
                 **{key:marker[key] for key in ('probe_sha256','optiscaler_sha256')},
                 'source_manifest_sha256':sha256(native/'source-manifest.json'),
                 'effects_source_manifest_sha256':sha256(effects/'source-manifest.json')}
@@ -196,6 +196,7 @@ class PortablePackageTest(unittest.TestCase):
             self.assertEqual((stage/'bin-native-effects/winmm.dll').read_bytes(),b'new validated proxy')
             staged=json.loads((stage/'bin-native-effects/renderer-build.json').read_text())
             self.assertTrue(staged['native_nr_after_sr'])
+            self.assertEqual(staged['native_nr_fg_tested_multipliers'],[2])
             self.assertEqual(staged['source_commit'],identity['source_commit'])
             self.assertEqual(staged['tracked_source_diff_sha256'],identity['tracked_source_diff_sha256'])
             self.assertEqual(staged['optiscaler_source'],opti)

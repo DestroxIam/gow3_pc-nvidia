@@ -18,6 +18,23 @@ import gow3_launcher_dlss as launcher
 
 
 class NativeNrProfileTest(unittest.TestCase):
+    def test_only_hash_gated_native_dlssg_2x_one_pass_combination_is_marked_tested(self):
+        self.marker['native_nr_fg_tested_multipliers']=[2,3,4,5,6]
+        self.write_marker()
+        baseline={**self.settings,'dlssg_mode':'2x','nvidia_nr_passes':'1'}
+        self.assertTrue(control.effective_profile(baseline,self.port)['fg_nr_combination_tested'])
+        self.assertEqual(control.native_nr_capability(self.port)['native_nr_fg_tested_multipliers'],[2])
+        for edits in ({'dlssg_mode':'3x'},{'dlssg_mode':'6x'},{'nvidia_nr_passes':'2'},
+                      {'nvidia_nr_passes':'3'},{'nvidia_fg_provider':'xefg'},{'nvidia_pipeline':'capture'}):
+            with self.subTest(edits=edits):
+                self.assertFalse(control.effective_profile({**baseline,**edits},self.port)['fg_nr_combination_tested'])
+        for name in ('winmm.dll','gow3-probe.exe'):
+            file=self.effects/name;old=file.read_bytes();file.write_bytes(b'untested binary')
+            self.assertFalse(control.effective_profile(baseline,self.port)['fg_nr_combination_tested'])
+            file.write_bytes(old)
+        self.marker['native_nr_fg_tested_multipliers']=['2',True,6];self.write_marker()
+        self.assertFalse(control.effective_profile(baseline,self.port)['fg_nr_combination_tested'])
+
     def setUp(self):
         self.temp=tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
@@ -194,7 +211,7 @@ class NativeNrProfileTest(unittest.TestCase):
         self.assertEqual(ini['DlssNr']['Intensity'],'1.5')
         state=control.nr_control_state(settings,self.port,'RTX 5070')
         self.assertTrue(state['selected'])
-        self.assertIn('Mais passadas/presets são experimentais',state['text'])
+        self.assertIn('mais passadas/presets são experimentais',state['text'])
         self.assertIn('BEFORE-SR permanece bloqueado',state['text'])
 
     def test_fg_nr_combo_is_explicitly_unverified(self):
@@ -205,7 +222,7 @@ class NativeNrProfileTest(unittest.TestCase):
         self.assertTrue(ini.getboolean('FrameGen','Enabled'))
         self.assertEqual(ini['FrameGen']['FGInput'],'upscaler')
         self.assertEqual(ini['FrameGen']['FGOutput'],'dlssg')
-        self.assertIn('FG + NR ainda não validado',control.nr_control_state(settings,self.port,'RTX 5070')['text'])
+        self.assertIn('combinação FG + NR não foi validada',control.nr_control_state(settings,self.port,'RTX 5070')['text'])
 
     def test_older_gpu_requires_explicit_experimental_opt_in(self):
         for gpu in ('RTX 3080','RTX 4070'):
@@ -241,8 +258,8 @@ class NativeNrProfileTest(unittest.TestCase):
             app.nvidia_nr_switch.configure.assert_called_with(state='normal')
             app.nvidia_nr_effective.set.assert_called_with(True)
             self.assertIn('selecionado para a próxima abertura',app.nvidia_nr_status.configure.call_args.kwargs['text'])
-            self.assertIn('no menu',app.nvidia_nr_status.configure.call_args.kwargs['text'])
-            self.assertIn('gameplay ainda não confirmada',app.nvidia_nr_status.configure.call_args.kwargs['text'])
+            self.assertIn('Uma passada é o perfil de teste',app.nvidia_nr_status.configure.call_args.kwargs['text'])
+            self.assertIn('Confirme SDK/NR no registro desta partida',app.nvidia_nr_status.configure.call_args.kwargs['text'])
             self.model.unlink()
             app.refresh_nvidia()
             app.nvidia_nr_switch.configure.assert_called_with(state='disabled')

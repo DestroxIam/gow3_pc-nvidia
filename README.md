@@ -2,7 +2,7 @@
 
 An extension of **[Felipe Prado's God of War III Remastered PC port](https://github.com/FelipePrado0/gow3_pc)**, based on upstream **Windows v2.1.8**. Bring your own extracted PS4 game dump. **No game files are included.**
 
-Source integration of upstream 2.1.8 is local and pending renderer/runtime acceptance; the existing release is unchanged.
+The local 2.1.8 source integration includes parent-observed native SR/NR and FG 2× in limited RTX 5070 gameplay tests. Final deployment/publication remain separate; the existing release is unchanged. See the scoped validation notes in [Changes](CHANGELOG.md).
 
 **[Download the Windows preview](https://github.com/DestroxIam/gow3_pc-nvidia/releases)** · [NVIDIA setup](docs/NVIDIA.md) · [Changes](CHANGELOG.md) · [Build/source](docs/BUILD-NVIDIA.md) · [Português](README.pt-BR.md)
 
@@ -12,8 +12,8 @@ Source integration of upstream 2.1.8 is local and pending renderer/runtime accep
 |---|---|
 | DLSS Super Resolution | Adapted to GoW3's actual scene/depth/camera pipeline. Internal raster size follows the preset, then reconstructs to the selected final size. |
 | DLAA | Native-resolution NVIDIA AA, mutually exclusive with DLSS reconstruction. |
-| Frame generation / MFG | Optional OptiScaler/Streamline bridge. 2× observed with the native path; 3×–6× exposed but not revalidated on this path. |
-| “DLSS5” Neural Rendering | Experimental community mod in **Compatibility** mode, with a separately supplied runtime. Suspended in native mode because that combination failed device interoperability. |
+| Frame generation / MFG | Optional OptiScaler/Streamline bridge. SR + NR + FG 2× observed with one NR pass on RTX 5070 and hash-identified runtimes; 3×–6× and extra passes remain unvalidated. |
+| “DLSS5” Neural Rendering | Experimental community mod in Compatibility or gated native AFTER-SR mode. Requires approved renderer/OptiScaler hashes and a user-supplied model/forwarder. BEFORE-SR remains blocked. |
 | Launcher | Redesigned NVIDIA page, internal → final resolution status, preserved FSR fallback and game controls. |
 | Portable layout | `Game/` placeholder, local dump detection, separate fork preferences and no included saves/caches. |
 

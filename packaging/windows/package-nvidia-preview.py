@@ -3,7 +3,7 @@
 from pathlib import Path
 import argparse,zipfile,shutil,configparser,json,hashlib
 from publication_policy import allowed_publication, allowed_source, relative_path, renderer_sync_report, update_checksum
-from runtime_provenance import read_object, verified_stage, sha256
+from runtime_provenance import read_object, verified_stage, sha256, tested_nr_fg_multipliers
 root=Path(__file__).resolve().parents[2]
 parser=argparse.ArgumentParser()
 parser.add_argument('--source-root',type=Path,default=root)
@@ -113,6 +113,7 @@ for folder in ('bin-native-dlss','bin-native-effects'):
             if any((stage/folder/name).stat().st_size==0 for name in ('gow3-probe.exe','winmm.dll')):
                 raise RuntimeError('Empty binary cannot carry the parent-validated NR capability')
             info['native_nr_after_sr']=True  # Carry explicit parent validation; never infer it from source/tests.
+            info['native_nr_fg_tested_multipliers']=sorted(set(tested_nr_fg_multipliers(candidate)) & set(tested_nr_fg_multipliers(receipt)))
     # Ship only public identity; source_manifest_sha256 refers to the original tested stage manifest.
     (stage/folder/'source-manifest.json').write_text(json.dumps(info,indent=2),encoding='utf-8')
     (stage/folder/'renderer-build.json').write_text(json.dumps(info,indent=2))
