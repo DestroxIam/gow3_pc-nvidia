@@ -61,9 +61,11 @@ def gpu_name(port, gpu_id=''):
         result = subprocess.run([str(Path(port)/'bin'/'gow3-gpu-capabilities.exe'),'--list'],
             capture_output=True,text=True,timeout=5,creationflags=subprocess.CREATE_NO_WINDOW if os.name=='nt' else 0)
         rows = [line.split('\t') for line in result.stdout.splitlines()]
-        rows = [row for row in rows if len(row)==3 and row[0].isdigit()]
+        rows = [row for row in rows if len(row)>=3 and row[0].isdigit()]
         selected = next((row for row in rows if row[0]==str(gpu_id)),None)
         if selected: return selected[1]
+        default = next((row for row in rows if len(row)>4 and row[4]=='1'),None)
+        if default: return default[1]
         discrete = next((row for row in rows if 'discrete' in row[2].lower()),None)
         if discrete: return discrete[1]
         if rows: return rows[0][1]

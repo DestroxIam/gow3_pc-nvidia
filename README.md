@@ -1,6 +1,8 @@
 # GoW3 PC — NVIDIA Community Preview
 
-An extension of **[Felipe Prado's God of War III Remastered PC port](https://github.com/FelipePrado0/gow3_pc)**, based on upstream **Windows v2.1.7**. Bring your own extracted PS4 game dump. **No game files are included.**
+An extension of **[Felipe Prado's God of War III Remastered PC port](https://github.com/FelipePrado0/gow3_pc)**, based on upstream **Windows v2.1.8**. Bring your own extracted PS4 game dump. **No game files are included.**
+
+Source integration of upstream 2.1.8 is local and pending renderer/runtime acceptance; the existing release is unchanged.
 
 **[Download the Windows preview](https://github.com/DestroxIam/gow3_pc-nvidia/releases)** · [NVIDIA setup](docs/NVIDIA.md) · [Changes](CHANGELOG.md) · [Build/source](docs/BUILD-NVIDIA.md) · [Português](README.pt-BR.md)
 

@@ -1,6 +1,8 @@
 # GoW3 PC — prévia comunitária NVIDIA
 
-Fork do port de **Felipe Prado**, baseado na versão Windows **2.1.7**. [Leia os requisitos, limites e créditos completos em inglês](README.md).
+Fork do port de **Felipe Prado**, baseado na versão Windows **2.1.8**. [Leia os requisitos, limites e créditos completos em inglês](README.md).
+
+A integração de fonte da 2.1.8 é local e aguarda validação do renderer/runtime; a release existente permanece igual.
 
 Baixe o ZIP em [Releases](https://github.com/DestroxIam/gow3_pc-nvidia/releases). Coloque seu próprio dump **extraído**, **CUSA01623 / atualização 01.02**, em `Game/CUSA01623/`. Não incluímos jogos, ISO, PKG, firmware, saves ou caches de shaders.
 

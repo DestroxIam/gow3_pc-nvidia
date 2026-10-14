@@ -11,6 +11,7 @@ Frozen with PyInstaller (packaging/windows/package.sh) the same God of War III.e
 game without the window (`--play`), run.py (`--run`) and the preparation scripts (`--script`),
 so a packaged port needs no Python installation.
 """
+import contextlib
 import glob
 import json
 import os
@@ -19,6 +20,7 @@ import queue
 import re
 import runpy
 import shutil
+import stat
 import signal
 import subprocess
 import sys
@@ -37,9 +39,11 @@ PORT_DIR = Path(sys.executable).resolve().parent if FROZEN else Path(__file__).r
 sys.path.insert(0, str(PORT_DIR / 'scripts'))
 import save_backup  # noqa: E402  (scripts/)
 import steam_shortcut  # noqa: E402  (scripts/)
+from patches import game_profile, game_sfo  # noqa: E402  (scripts/)
+from prepare import load_sfo  # noqa: E402  (scripts/)
 DATA_DIR = Path(os.environ.get('GOW3_DATA_DIR', PORT_DIR))
 CONFIG_DIR = (Path(os.environ.get('APPDATA', Path.home())) if WINDOWS else
-              Path(os.environ.get('XDG_CONFIG_HOME') or Path.home() / '.config')) / 'gow3-nvidia-launcher'
+              Path(os.environ.get('XDG_CONFIG_HOME') or Path.home() / '.config')) / 'gow3-launcher'
 CONFIG_FILE = CONFIG_DIR / 'settings.json'
 MOD_PRESETS = DATA_DIR / 'mods_presets.json'
 APP_NAME = 'God of War III'
@@ -49,9 +53,9 @@ NO_WINDOW = getattr(subprocess, 'CREATE_NO_WINDOW', 0)
 NEW_GROUP = {} if WINDOWS else {'start_new_session': True}
 UI_FONT, MONO_FONT, SERIF_FONT = 'Segoe UI', 'Consolas', 'Georgia'
 # This build; GitHub release tags are windows-v<VERSION>.
-VERSION = '2.1.7-nvidia-preview.1'
-RELEASES_API = 'https://github.com/DestroxIam/gow3_pc-nvidia/releases'
-RELEASES_PAGE = 'https://github.com/DestroxIam/gow3_pc-nvidia/releases'
+VERSION = '2.1.8'
+RELEASES_API = 'https://api.github.com/repos/FelipePrado0/gow3_pc/releases/latest'
+RELEASES_PAGE = 'https://github.com/FelipePrado0/gow3_pc/releases/latest'
 UPDATE_DIR = Path(tempfile.gettempdir()) / 'gow3-update'
 # Never copied over an installation by an update (the package does not hold them either).
 USER_FILES = ('Game', 'user', 'out', 'mods', 'gow3.ini', 'mods.json', 'mods_presets.json', 'patches.json', 'last_run.log')
@@ -87,7 +91,7 @@ def run_role(argv):
     attach_stdio()
     for stream in (sys.stdout, sys.stderr):  # keep messages in order with the game's output
         try:
-            stream.reconfigure(line_buffering=True)
+            stream.reconfigure(encoding='utf-8', line_buffering=True)
         except (AttributeError, ValueError):
             pass
     if argv[0] == '--script':
@@ -113,9 +117,27 @@ def find_tool(name):
 
 
 def parse_gpu_list(text):
-    """(index, name, type) per line of `gow3-gpu-capabilities --list`; other lines are skipped."""
+    """One tuple per line of `gow3-gpu-capabilities --list`: index, name, type and, from the tools
+    that print them, the game's multisampling default on that driver ('off' or 'on') and '1' on
+    the GPU the game picks without GOW3_GPU_ID. Other lines are skipped."""
     rows = [line.split('\t') for line in text.splitlines()]
-    return [tuple(row) for row in rows if len(row) == 3 and row[0].isdigit()]
+    return [tuple(row) for row in rows if len(row) >= 3 and row[0].isdigit()]
+
+
+def chosen_gpu(gpus, gpu_id):
+    """The row of parse_gpu_list the game will run on: the Graphics card setting when it is in the
+    list, else the GPU the tool marks as the game's pick; None when neither is known."""
+    chosen = [row for row in gpus if row[0] == str(gpu_id)]
+    return (chosen or [row for row in gpus if len(row) > 4 and row[4] == '1'] or [None])[0]
+
+
+def no_msaa_options(gpus, gpu_id):
+    """NO_MSAA with Automatic naming the chosen card and the game's decision for it."""
+    row = chosen_gpu(gpus, gpu_id)
+    if row is None or len(row) < 4 or row[3] not in ('off', 'on'):
+        return list(NO_MSAA)
+    label = _('Automatic ({}: off)' if row[3] == 'off' else 'Automatic ({}: on)').format(row[1])
+    return [('', (label,))] + NO_MSAA[1:]
 
 
 def list_gpus():
@@ -138,11 +160,6 @@ def list_gpus():
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import button_icons  # noqa: E402
 import gow3_lang  # noqa: E402
-# Frozen language helpers insert _internal; restore the installed source priority.
-sys.path.insert(0, str(PORT_DIR / "scripts"))
-sys.path.insert(0, str(PORT_DIR / "launcher"))
-import gow3_dlss_control
-import game_layout
 
 LANG = 'en'
 FONT_LOADED = False  # set by main() for the window; the command-line roles never need the font
@@ -254,10 +271,10 @@ INI_DEFAULTS = {'upscaler': 'fsr4', 'preset': '1', 'sharpen': '1', 'sharpness': 
                 'rcas_strength': '75', 'frames_queued': '1', 'cheat_very_hard': '0', 'cheat_double_jumps': '0'}
 DISPLAY_MODES = [('windowed', ('Windowed',)), ('borderless', ('Borderless',)), ('fullscreen', ('Fullscreen',))]
 FPS_LIMITS = [('30', ('30',)), ('60', ('60',)), ('120', ('120',)), ('240', ('240',)), ('0', ('Unlimited',))]
-APP_DEFAULTS = {'ui_language': 'en', 'game_dir': os.environ.get('GOW3_GAME_DIR', str(game_layout.find_game(PORT_DIR) or PORT_DIR/'Game')), 'update_dir': '', 'experimental_upscaler': False,
+APP_DEFAULTS = {'ui_language': 'en', 'game_dir': os.environ.get('GOW3_GAME_DIR', str(PORT_DIR.parent / 'CUSA01623') if WINDOWS else ''), 'update_dir': '', 'experimental_upscaler': False,
                 'video_backend': 'auto', 'gamemode': False, 'mangohud': False, 'desktop_integration': True, 'user_dir': '',
                 'mods_dir': '', 'mods_enabled': True, 'patches_dir': '', 'language': '1',
-                'player_name': '', 'hdr': False, 'draw_pipe': '', 'readbacks': '', 'stream_memory': 'cached',
+                'player_name': '', 'hdr': False, 'draw_pipe': '', 'readbacks': '', 'no_msaa': '', 'stream_memory': 'cached',
                 'gpu_id': '', 'background_warmup': True, 'parallel_warmup': True, 'pipeline_binary_cache': True,
                 'perf_diag': False, 'frame_capture_key': False, 'frame_stats': False, 'gpu_profile': False,
                 'vk_validation': False, 'close_on_play': False,
@@ -317,7 +334,8 @@ def control_map(controls, kind):
     return ','.join(f'{button}={chosen[button].strip()}' for button, _key, _pad in CONTROLS
                     if button in chosen and not set(chosen[button]) & set(',='))
 
-UPSCALERS = [('fsr4', ('FSR 4 (best quality)', 'FSR 4 (лучшее качество)')),
+UPSCALERS = [('dlss', ('DLSS (NVIDIA GeForce RTX)',)),
+             ('fsr4', ('FSR 4 (best quality)', 'FSR 4 (лучшее качество)')),
              ('fsr411', ('FSR 4.1.1 (needs fsr4_411 assets)', 'FSR 4.1.1 (нужны ассеты fsr4_411)')),
              ('fsr3', ('FSR 3.1 (every GPU)', 'FSR 3.1 (любая видеокарта)')),
              ('taa', ('TAA (native resolution anti-aliasing)', 'TAA (нативное сглаживание)')),
@@ -335,6 +353,13 @@ DRAW_PIPE = [('', ('Auto (8+ threads)', 'Авто (8+ потоков)')), ('1', 
              ('0', ('Off (more stable)', 'Выключен (стабильнее)'))]
 READBACKS = [('', ('Relaxed (default)', 'Relaxed (по умолчанию)')), ('0', ('Off', 'Выключены')),
              ('2', ('Precise',))]
+# GOW3_NO_MSAA: '' leaves the game's own default, off on AMD's and Intel's Windows drivers
+# (video_core/amdgpu/gow3_msaa_default.h); no_msaa_options names the chosen card in Automatic.
+NO_MSAA = [('', ('Automatic',)), ('1', ('Off (fixes black lines)',)), ('0', ('On',))]
+NO_MSAA_HINT = ("The game's 2-sample depth buffer, read as a texture by its lighting. AMD's and Intel's Windows "
+                'drivers read it wrong and the lighting shows black lines, so Automatic turns multisampling off '
+                'on those cards (Radeon, Arc) and keeps it on elsewhere (NVIDIA). Off and On force the choice on '
+                'any card.')
 STREAM_MEMORY = [('cached', ('System RAM (cached, default)',)),
                  ('host', ('System RAM (uncached)',)),
                  ('device', ('GPU memory (previous behavior)',))]
@@ -366,7 +391,7 @@ def fsr4_folder():
 
 def fsr4_missing():
     folder = fsr4_folder()
-    return [name for name in fsr4_files() if not (folder / name).is_file() or not (folder / name).stat().st_size]
+    return [name for name in fsr4_files() if not usable(folder / name)]
 
 
 def load_json(path, default):
@@ -379,8 +404,6 @@ def load_json(path, default):
 def ini_path():
     return Path(os.environ.get('GOW3_CONFIG', DATA_DIR / 'gow3.ini'))
 
-
-APP_DEFAULTS.update(gow3_dlss_control.DEFAULTS)
 
 def load_ini():
     values, lines = dict(INI_DEFAULTS), []
@@ -417,12 +440,8 @@ def game_info(folder):
     folder = Path(folder or '.')
     if not (folder / 'eboot.bin').is_file():
         return None
-    try:
-        from prepare import sfo
-        values = sfo((folder / 'sce_sys/param.sfo').read_bytes())
-        return values.get('TITLE', APP_NAME).replace('™', '').replace('®', '').strip(), values.get('APP_VER', '?')
-    except (OSError, ValueError, ImportError):
-        return APP_NAME, '?'
+    values = game_sfo(folder)
+    return values.get('TITLE', APP_NAME).replace('™', '').replace('®', '').strip(), values.get('APP_VER', '?')
 
 
 def meta_folder(game_dir, update_dir):
@@ -445,12 +464,154 @@ def linux_tools():
                 glob.glob(os.path.join(d, '*angoHud*.json')) for d in VULKAN_LAYER_DIRS)}
 
 
-REQUIRED_GAME_FILES = ('sce_sys/param.sfo', 'sce_module/libc.prx', 'sce_module/libSceFios2.prx')
+def file_state(path):
+    """'ok', 'missing', 'folder', 'empty' or 'unreadable' for a file the port needs, from one
+    stat: an empty one (a copy that failed, a placeholder made by hand) is as good as missing."""
+    try:
+        status = Path(path).stat()
+    except (FileNotFoundError, NotADirectoryError):
+        return 'missing'
+    except OSError:
+        return 'unreadable'
+    if stat.S_ISDIR(status.st_mode):
+        return 'folder'
+    if not stat.S_ISREG(status.st_mode):
+        return 'missing'
+    if status.st_size == 0:
+        return 'empty'
+    try:
+        with Path(path).open('rb') as stream:
+            stream.read(1)
+    except OSError:
+        return 'unreadable'
+    return 'ok'
 
 
-def missing_game_files(folder):
-    """Files the port loads from the dump that the folder lacks (an incomplete dump)."""
-    return [name for name in REQUIRED_GAME_FILES if not (Path(folder) / name).is_file()]
+def usable(path):
+    return file_state(path) == 'ok'
+
+
+def sfo_state(path):
+    """file_state for a param.sfo, which must also parse: 'invalid' when it does not."""
+    state = file_state(path)
+    if state != 'ok':
+        return state
+    try:
+        load_sfo(path)
+    except OSError:
+        return 'unreadable'
+    except ValueError:
+        return 'invalid'
+    return 'ok'
+
+
+# The files the port loads from a dump, each with the check it must pass.
+REQUIRED_GAME_FILES = (('eboot.bin', file_state), ('sce_sys/param.sfo', sfo_state),
+                       ('sce_module/libc.prx', file_state), ('sce_module/libSceFios2.prx', file_state))
+REQUIRED_UPDATE_FILES = REQUIRED_GAME_FILES[:2]
+
+
+def missing_game_files(folder, requirements=REQUIRED_GAME_FILES):
+    """[(name, state)] for the required files that do not pass their check in the folder: an
+    incomplete dump, a placeholder made by hand, a file this user may not read, a param.sfo
+    that is not one."""
+    folder = Path(folder or '.')
+    return [(name, state) for name, check in requirements if (state := check(folder / name)) != 'ok']
+
+
+def describe_missing(missing):
+    """The entries of missing_game_files as shown to the player."""
+    labels = {'empty': _('{} (empty)'), 'unreadable': _('{} (unreadable)'),
+              'invalid': _('{} (not a param.sfo)'), 'folder': _('{} (a folder, not a file)')}
+    return [labels[state].format(name) if state in labels else name for name, state in missing]
+
+
+def ready_to_play(game_dir, update_dir=''):
+    """Whether --play (Steam, "Play God of War III.exe") may start the game at once; anything
+    the Play button would refuse opens the launcher window instead."""
+    if update_dir and same_folder(update_dir, game_dir or '.'):
+        return False
+    return not (missing_game_files(game_dir)
+                or (update_dir and missing_game_files(update_dir, REQUIRED_UPDATE_FILES)))
+
+
+def same_folder(a, b):
+    """Whether two paths name one folder (links and 8.3 spellings included)."""
+    return os.path.normcase(os.path.realpath(a)) == os.path.normcase(os.path.realpath(b))
+
+
+def system_files_beside(folder, reference=None, base=None):
+    """PKG extractors write the system files (param.sfo, icon0.png, pic1.png, trophy/) to Sc0/
+    beside the game files (Image0/), while the port reads them from the folder's sce_sys/: the
+    Sc0 folder beside `folder` holding a God of War III param.sfo (patches.game_profile), while
+    `folder` has none worth keeping (an unreadable one is a different problem). For an update
+    folder the title must be that of `reference` (the base game's param.sfo values); an Sc0
+    beside the base game itself (`base`) is the base game's own unless the base game's param.sfo
+    says another version."""
+    folder = Path(os.path.abspath(folder or '.'))
+    if sfo_state(folder / 'sce_sys/param.sfo') in ('ok', 'unreadable') or folder.parent == folder:
+        return None
+    try:
+        with os.scandir(folder.parent) as entries:  # a linked Sc0 (mklink /J) counts too
+            names = [e.name for e in entries if e.is_dir() and e.name.casefold() == 'sc0']
+    except OSError:
+        return None
+    if len(names) != 1 or os.path.normcase(names[0]) == os.path.normcase(folder.name):
+        return None
+    sibling = folder.parent / names[0]
+    try:
+        values = load_sfo(sibling / 'param.sfo')
+    except (OSError, ValueError):
+        return None
+    title = values.get('TITLE')
+    if not game_profile(values.get('TITLE_ID'), title if isinstance(title, str) else None):
+        return None
+    if reference is not None and values.get('TITLE_ID') != reference.get('TITLE_ID'):
+        return None
+    if base is not None and same_folder(folder.parent, Path(os.path.abspath(base)).parent) and (
+            reference is None or values.get('APP_VER') == reference.get('APP_VER')):
+        return None
+    return sibling
+
+
+@contextlib.contextmanager
+def replacing(destination):
+    """A .part path to write `destination` through: the file takes its place whole on success
+    and is removed on failure, so a write cut short never passes for the file."""
+    part = destination.with_name(destination.name + '.part')
+    try:
+        yield part
+        os.replace(part, destination)
+    except BaseException:
+        part.unlink(missing_ok=True)
+        raise
+
+
+def adopt_system_files(source, game):
+    """Copies the files of `source` (an Sc0/ folder) into <game>/sce_sys, keeping every usable
+    file the game already has there (empty ones, and a param.sfo that is not one, are replaced);
+    returns the relative names copied. Each file lands whole or not at all, and param.sfo goes
+    last: while it is missing, a copy that failed halfway is offered again."""
+    source, target = Path(source), Path(game) / 'sce_sys'
+
+    def unreadable(error):  # os.walk would skip the folder silently
+        raise error
+    files = sorted(((Path(directory) / name).relative_to(source)
+                    for directory, _folders, names in os.walk(source, onerror=unreadable) for name in names),
+                   key=lambda relative: (relative.as_posix() == 'param.sfo', relative.as_posix()))
+    copied = []
+    for relative in files:
+        destination = target / relative
+        if destination.is_dir():
+            raise OSError(f'{destination} is a folder: {source / relative} cannot replace it')
+        check = sfo_state if relative.as_posix() == 'param.sfo' else file_state
+        if check(destination) == 'ok':
+            continue
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        with replacing(destination) as part:
+            shutil.copy2(source / relative, part)
+        copied.append(relative.as_posix())
+    return copied
 
 
 DESKTOP_MARKER = 'X-GOW3-Integration=true'
@@ -544,8 +705,8 @@ def game_environment(s):
         env['GOW3_USER_NAME'] = str(s['player_name']).strip()
     if s['hdr']:
         env['GOW3_HDR'] = '1'
-    for key, name in (('draw_pipe', 'GOW3_DRAW_PIPE'), ('readbacks', 'GOW3_READBACKS')):
-        if s[key]:
+    for key, name in (('draw_pipe', 'GOW3_DRAW_PIPE'), ('readbacks', 'GOW3_READBACKS'), ('no_msaa', 'GOW3_NO_MSAA')):
+        if s.get(key):
             env[name] = s[key]
     # The saved UI choice wins over inherited diagnostic overrides, including when reverting.
     stream_memory = s.get('stream_memory', APP_DEFAULTS['stream_memory'])
@@ -567,7 +728,7 @@ def game_environment(s):
             env[name] = value
     env['PYTHONUNBUFFERED'] = '1'
     env['PYTHONIOENCODING'] = 'utf-8'
-    return gow3_dlss_control.configure_environment(env, s, PORT_DIR)
+    return env
 
 
 # ---------------------------------------------------------------------------------------------
@@ -585,11 +746,8 @@ class Launcher:
     def __init__(self, root, tk, ttk, filedialog, messagebox):
         self.tk, self.ttk, self.filedialog, self.messagebox = tk, ttk, filedialog, messagebox
         self.root = root
-        saved = game_layout.resolve_settings(load_json(CONFIG_FILE, {}), PORT_DIR)
-        defaults = gow3_dlss_control.recommended(gow3_dlss_control.gpu_name(str(PORT_DIR), str(saved.get('gpu_id',''))))
-        self.app = {**APP_DEFAULTS, **defaults, **saved}
+        self.app = {**APP_DEFAULTS, **load_json(CONFIG_FILE, {})}
         self.ini, self.ini_lines = load_ini()
-        if self.ini.get('upscaler') == 'dlss': self.ini['upscaler'] = 'off'
         self.vars = {}
         self.process = self.job = None
         self.downloading = False
@@ -876,7 +1034,7 @@ class Launcher:
         self.side_title.pack(anchor='w', padx=22, pady=(24, 22))
         self.side = side
         self.nav, self.current_page = {}, None
-        for name, title in (('home', _('Home')), ('display', _('Display')), ('nvidia', 'NVIDIA'),
+        for name, title in (('home', _('Home')), ('display', _('Display')),
                             ('graphics', _('Graphics (experimental)', 'Графика (эксп.)')),
                             ('performance', _('Performance')),
                             ('game', _('Game', 'Игра')), ('patches', _('Patches', 'Патчи')),
@@ -910,7 +1068,6 @@ class Launcher:
 
         self.pages = {}
         self.build_home()
-        self.build_nvidia()
         self.build_graphics()
         self.build_display()
         self.build_performance()
@@ -1010,159 +1167,6 @@ class Launcher:
         except (ImportError, OSError):
             factor = max(1, round(self.banner_image.width() / max(width, 1)))
             return self.banner_image.subsample(factor) if factor > 1 else self.banner_image
-
-    def nvidia_slider(self, parent, key, title, maximum=100, hint=None):
-        holder = self.ttk.Frame(parent)
-        var = self.var(key, 'app')
-        slider = self.tk.Scale(holder, from_=0, to=maximum, orient='horizontal', variable=var,
-            showvalue=False, length=self.px(260), width=self.px(12), sliderlength=self.px(18),
-            bg=ACCENT, troughcolor=CARD, activebackground=ACCENT_HI, highlightthickness=0, bd=0, sliderrelief='flat')
-        slider.pack(side='left')
-        number = self.ttk.Label(holder, width=5)
-        number.pack(side='left', padx=10)
-        def show(*_args):
-            try: number.configure(text=f'{round(float(var.get()))}%')
-            except (ValueError, self.tk.TclError): pass
-        var.trace_add('write', show)
-        show()
-        self.row(parent, title, holder, hint, restart=True)
-        return slider
-
-    def build_nvidia(self):
-        f = self.scrolled_page('nvidia', 'NVIDIA', 'DLSS, DLAA, Neural Rendering e geração de quadros em uma só guia.')
-        name = gow3_dlss_control.gpu_name(str(PORT_DIR), str(self.app.get('gpu_id', '')))
-        self.nvidia_hardware = gow3_dlss_control.hardware(name)
-        self.nvidia_gpu_label = self.ttk.Label(f, text=name, foreground=TEXT)
-        self.nvidia_gpu_label.grid(row=self.next_row(f), column=0, columnspan=2, sticky='w', pady=(0,8))
-        self.section(f, 'DLSS / DLAA', top=4)
-        self.row(f,'Integração',self.choice(f,'nvidia_pipeline','app',[
-            ('renderer',('Nativa · resolução interna automática',)),
-            ('capture',('Compatibilidade · processamento externo',))],width=42),
-            'Nativa: o preset determina o tamanho da cena e o DLSS reconstrói para a resolução final. '
-            'Compatibilidade mantém Neural Rendering e geração de quadros; processa a imagem já desenhada.',restart=True)
-        self.row(f, 'Tratamento da imagem', self.choice(f, 'nvidia_mode', 'app', [
-            ('off', ('Desligado · usar opções do Display / FSR',)),
-            ('dlaa', ('DLAA · resolução nativa',)), ('dlss', ('DLSS · reconstrução da imagem',))], width=42),
-            'DLAA trabalha na resolução da imagem final. DLSS reconstrói a partir de uma entrada menor.', restart=True)
-        quality_row = self.next_row(f)
-        self.nvidia_dlss_quality = self.row(f, 'Qualidade do DLSS', self.choice(f, 'nvidia_quality', 'app', [
-            ('ultra_quality', ('Ultra Qualidade',)), ('quality', ('Qualidade',)), ('balanced', ('Equilibrado',)),
-            ('performance', ('Desempenho',)), ('ultra_performance', ('Ultra Desempenho',))]), restart=True)
-        self.nvidia_quality_widgets = tuple(f.grid_slaves(row=quality_row))
-        self.nvidia_output_choice=self.row(f,'Resolução final',self.choice(f,'nvidia_output_res','app',[
-            ('1280x720',('720p · 1280 × 720',)),('1920x1080',('1080p · 1920 × 1080',)),
-            ('2560x1440',('1440p · 2560 × 1440',)),('3840x2160',('4K · 3840 × 2160',))],width=28),
-            'O preset calcula a resolução interna automaticamente. DLAA usa o tamanho final sem upscale.',restart=True)
-        self.nvidia_image_status = self.ttk.Label(f, text='', foreground=ACCENT_HI, wraplength=self.px(680))
-        self.nvidia_image_status.grid(row=self.next_row(f), column=0, columnspan=2, sticky='w', pady=(8,0))
-        self.note(f, 'Na integração nativa, DLSS e DLAA atuam no renderizador. A cena é desenhada na resolução interna calculada e reconstruída '
-                     'para a resolução final. A escolha manual em Desempenho vale quando esses modos estão desligados. '
-                     'A resolução física da tela permanece a do monitor.', top=6)
-        self.section(f, 'DLSS5 · Neural Rendering')
-        self.nvidia_nr_effective=self.tk.BooleanVar(value=False)
-        self.nvidia_nr_switch=self.check(f, 'dlss5_enabled', 'app', 'Ativar Neural Rendering',
-            'Disponível na integração Compatibilidade. Suspenso quando DLSS / DLAA usam o renderizador nativo.',
-            var=self.nvidia_nr_effective,restart=True)
-        self.nvidia_nr_switch.configure(command=lambda:self.var('dlss5_enabled','app').set(self.nvidia_nr_effective.get()))
-        self.nvidia_nr_widgets = []
-        self.nvidia_nr_widgets.append(self.row(f, 'Preset visual', self.choice(f, 'nvidia_nr_style', 'app', [
-            ('standard', ('Padrão',)), ('natural', ('Natural',)), ('cinematic', ('Cinematográfico',))]), restart=True))
-        self.nvidia_nr_widgets.append(self.row(f, 'Passadas do modelo', self.choice(f, 'nvidia_nr_passes', 'app', [
-            ('1', ('1 · recomendado',)), ('2', ('2',)), ('3', ('3',))]),
-            'Mais passadas aumentam o custo e podem alterar mais a imagem.', restart=True))
-        self.nvidia_nr_widgets.append(self.row(f, 'Resolução do modelo', self.choice(f, 'dlss5_quality', 'app', [
-            ('light', ('Leve · 33%',)), ('balanced', ('Equilibrada · 50%',)),
-            ('high', ('Alta · 67%',)), ('native', ('Nativa · 100%',))]), restart=True))
-        self.nvidia_nr_widgets.append(self.nvidia_slider(f, 'nvidia_nr_intensity', 'Intensidade do modelo', 200))
-        self.nvidia_nr_widgets.append(self.nvidia_slider(f, 'dlss5_strength', 'Mistura de detalhes',
-            hint='0% preserva os detalhes originais; 100% aplica toda a transferência neural.'))
-        self.nvidia_nr_widgets.append(self.nvidia_slider(f, 'nvidia_nr_colour', 'Mistura de cores'))
-        self.section(f, 'Geração de quadros')
-        self.nvidia_fg_provider_choice=self.row(f, 'Tecnologia', self.choice(f, 'nvidia_fg_provider', 'app', [
-            ('dlssg', ('NVIDIA · DLSS Frame Generation',)), ('xefg', ('XeFG · alternativa experimental',))], width=42), restart=True)
-        self.nvidia_fg_choice=self.row(f, 'Multi Frame Generation', self.choice(f, 'dlssg_mode', 'app',
-            [('off', ('Desligada',))] + [(f'{n}x', (f'{n}×',)) for n in range(2,7)]),
-            '2× = um quadro renderizado + um gerado; 6× = um renderizado + cinco gerados. '
-            'O FPS do motor continua separado. XeFG neste perfil usa apenas 2×.', restart=True)
-        self.check(f, 'nvidia_fps_overlay', 'app', 'Mostrar FPS com geração de quadros',
-            'No canto esquerdo: FPS estimado com geração / FPS base. O contador Native à direita mostra só os quadros do motor. '
-            'O painel Home pode suspender a geração enquanto está aberto.', restart=True)
-        self.nvidia_compatibility = self.ttk.Label(f, text='', style='Muted.TLabel', wraplength=self.px(680), justify='left')
-        self.nvidia_compatibility.grid(row=self.next_row(f), column=0, columnspan=2, sticky='w', pady=(8,0))
-        self.section(f, 'Compatibilidade experimental')
-        self.nvidia_ada_switch = self.check(f, 'nvidia_ada_mfg', 'app', 'Testar MFG acima de 2× na RTX 40',
-            'Extensão experimental do mod. Ainda sem validação em uma RTX 40.', restart=True)
-        self.nvidia_older_switch = self.check(f, 'nvidia_older_nr', 'app', 'Testar Neural Rendering nas RTX 30/40',
-            'O modelo instalado foi validado apenas na RTX 5070. Marcar esta opção não garante compatibilidade.', restart=True)
-        self.section(f, 'Aplicar e jogar')
-        holder = self.ttk.Frame(f)
-        holder.grid(row=self.next_row(f), column=0, columnspan=2, sticky='w', pady=(10,0))
-        self.ttk.Button(holder, text='Salvar configurações', command=self.save_nvidia).pack(side='left')
-        self.ttk.Button(holder, text='Restaurar recomendado', command=self.reset_nvidia).pack(side='left', padx=8)
-        self.nvidia_saved = self.ttk.Label(f, text='', foreground=ACCENT_HI)
-        self.nvidia_saved.grid(row=self.next_row(f), column=0, columnspan=2, sticky='w', pady=(10,0))
-        self.note(f, 'Salve e clique em JOGAR. Mudanças durante uma partida entram na próxima abertura. '
-                     'Home abre os ajustes avançados do mod; F6 compara Neural Rendering ligado / desligado. '
-                     'A integração é experimental e pode produzir rastros em movimento.', top=8)
-        for key in ('nvidia_mode','nvidia_quality','nvidia_output_res','nvidia_pipeline','dlss5_enabled','gpu_id'):
-            self.var(key, 'app').trace_add('write', self.refresh_nvidia)
-        self.refresh_nvidia()
-
-    def refresh_nvidia(self, *_args):
-        name = gow3_dlss_control.gpu_name(str(PORT_DIR), self.var('gpu_id','app').get())
-        h = self.nvidia_hardware = gow3_dlss_control.hardware(name)
-        self.nvidia_gpu_label.configure(text=name)
-        mode = self.var('nvidia_mode','app').get()
-        native=self.var('nvidia_pipeline','app').get()=='renderer' and mode!='off'
-        self.nvidia_dlss_quality.configure(state='readonly' if mode=='dlss' else 'disabled')
-        for widget in self.nvidia_quality_widgets:
-            if mode=='dlss': widget.grid()
-            else: widget.grid_remove()
-        self.nvidia_image_status.configure(text={
-            'dlaa':'DLAA ativo · DLSS de reconstrução desligado.',
-            'dlss':'DLSS ativo · DLAA desligado.',
-            'off':'DLSS e DLAA desligados.'}.get(mode,''))
-        if native:
-            dims=gow3_dlss_control.renderer_dimensions({k:self.var(k,'app').get() for k in gow3_dlss_control.DEFAULTS})
-            self.nvidia_image_status.configure(text=('DLAA ativo · DLSS desligado · ' if mode=='dlaa' else 'DLSS ativo · DLAA desligado · ')+
-                f'{dims["input"][0]} × {dims["input"][1]} interno → {dims["output"][0]} × {dims["output"][1]} final')
-        self.nvidia_output_choice.configure(state='readonly' if native else 'disabled')
-        nr = self.var('dlss5_enabled','app').get() and not native
-        self.nvidia_nr_effective.set(bool(nr))
-        self.nvidia_nr_switch.configure(state='disabled' if native else 'normal')
-        self.nvidia_fg_provider_choice.configure(state='readonly')
-        self.nvidia_fg_choice.configure(state='readonly')
-        for widget in self.nvidia_nr_widgets:
-            widget.configure(state=('readonly' if isinstance(widget,self.ttk.Combobox) else 'normal') if nr else 'disabled')
-        self.nvidia_ada_switch.configure(state='normal' if h['generation']==40 else 'disabled')
-        self.nvidia_older_switch.configure(state='normal' if h['rtx'] and h['generation']<50 else 'disabled')
-        text = 'DLSS / DLAA disponíveis nas GeForce RTX. '
-        if h['native_mfg']: text += 'RTX 50: NVIDIA 2×–6×. Neste computador, o SDK informou até cinco quadros gerados.'
-        elif h['native_fg']: text += 'RTX 40: NVIDIA 2×; acima disso, somente com MFG experimental. Neural Rendering ainda não validado.'
-        elif h['rtx']: text += 'RTX 30: geração NVIDIA nativa indisponível; alternativa XeFG 2× experimental. Neural Rendering ainda não validado.'
-        else: text = 'Use o FSR nas opções do Display / Graphics. Recursos NVIDIA exigem uma GeForce RTX.'
-        self.nvidia_compatibility.configure(text=text)
-        if native:
-            self.nvidia_compatibility.configure(text='Neste caminho, geração de quadros 2× foi confirmada. Neural Rendering fica suspenso: '
-                'a combinação com o novo renderizador apresentou falha de interoperação; use Compatibilidade para esse efeito. '
-                'Os valores salvos são preservados para alternar de volta.')
-        if hasattr(self,'status') and hasattr(self,'game_patch_title'): self.refresh_status()
-
-    def save_nvidia(self):
-        try:
-            candidate = dict(self.app)
-            candidate.update({k:self.var(k,'app').get() for k in gow3_dlss_control.DEFAULTS})
-            candidate['gpu_id'] = self.var('gpu_id','app').get()
-            gow3_dlss_control.validate(candidate, PORT_DIR)
-            self.collect()
-            self.nvidia_saved.configure(text='Configurações salvas. Serão usadas na próxima abertura.')
-        except (OSError, ValueError) as error:
-            self.messagebox.showerror('NVIDIA', str(error))
-
-    def reset_nvidia(self):
-        name = gow3_dlss_control.gpu_name(str(PORT_DIR), self.var('gpu_id','app').get())
-        for key, value in gow3_dlss_control.recommended(name).items(): self.var(key,'app').set(value)
-        self.save_nvidia()
 
     def build_graphics(self):
         """Temporal upscalers: not calibrated for this game yet, so run.py turns them off unless the
@@ -1280,8 +1284,9 @@ class Launcher:
         self.check(f, 'parallel_warmup', 'app', _('Fast shader cache loading (parallel)'),
                    _('Loading screen only: builds the cached pipelines on several CPU threads.'))
         self.section(f, _('GPU data'))
-        gpus = [('', ('Automatic',))] + [(index, (name,)) for index, name, _kind in list_gpus()]
-        self.row(f, _('Graphics card'), self.choice(f, 'gpu_id', 'app', gpus),
+        gpus = list_gpus()
+        cards = [('', ('Automatic',))] + [(row[0], (row[1],)) for row in gpus]
+        self.row(f, _('Graphics card'), self.choice(f, 'gpu_id', 'app', cards),
                  _('The GPU the game runs on. Choose your dedicated card if the game uses the integrated one.'),
                  restart=True)
         self.row(f, _('Stream buffer memory'), self.choice(f, 'stream_memory', 'app', STREAM_MEMORY),
@@ -1297,6 +1302,15 @@ class Launcher:
         self.row(f, _('GPU readbacks', 'Чтение данных GPU'), self.choice(f, 'readbacks', 'app', READBACKS),
                  _('How exactly data the GPU writes is copied back for the game.',
                    'Насколько точно данные, записанные GPU, возвращаются игре.'))
+        card = self.var('gpu_id', 'app')
+        box = self.choice(f, 'no_msaa', 'app', no_msaa_options(gpus, card.get()))
+        self.row(f, _('Game multisampling'), box, _(NO_MSAA_HINT), restart=True)
+
+        def relabel(*_args):  # Automatic names the card the game will run on
+            index = max(box.current(), 0)
+            box['values'] = [_(*text) for _value, text in no_msaa_options(gpus, card.get())]
+            box.current(index)
+        card.trace_add('write', relabel)
 
     def build_game(self):
         f = self.scrolled_page('game', _('Game', 'Игра'), _('Your game dump, saves and language.'))
@@ -1633,6 +1647,8 @@ class Launcher:
         self.refresh_status()
 
     def refresh_status(self):
+        if getattr(self, 'copying_system_files', False):
+            return
         info = game_info(self.meta_dir())
         if not self.process:
             self.play_button.configure(text=_('PLAY', 'ИГРАТЬ'), state='normal' if info else 'disabled')
@@ -1644,9 +1660,6 @@ class Launcher:
         title_id, _profile = game_profile_of(self.meta_dir())
         names = self.app.get('game_patches', {}).get(title_id) or []
         resolution = dict((v, t[0]) for v, t in RESOLUTION_CHOICES).get(self.var('render_resolution', 'ini').get(), '?')
-        if self.var('nvidia_pipeline','app').get()=='renderer' and self.var('nvidia_mode','app').get()!='off':
-            dims=gow3_dlss_control.renderer_dimensions({k:self.var(k,'app').get() for k in gow3_dlss_control.DEFAULTS})
-            resolution=f"{dims['input'][0]}×{dims['input'][1]} → {dims['output'][0]}×{dims['output'][1]}"
         from patches import game_patchable, patch_status
         if not game_patchable(self.meta_dir()):
             return _('{} · 60 FPS engine · no patches for this game').format(resolution)
@@ -1676,10 +1689,9 @@ class Launcher:
             try:
                 folder.mkdir(parents=True, exist_ok=True)
                 for name in fsr4_missing():
-                    part = folder / (name + '.part')
-                    with urllib.request.urlopen(f'{FSR4_BASE}/{name}', timeout=60) as response:
+                    with replacing(folder / name) as part, \
+                            urllib.request.urlopen(f'{FSR4_BASE}/{name}', timeout=60) as response:
                         part.write_bytes(response.read())
-                    part.replace(folder / name)
                     self.ui_calls.put(self.refresh_fsr4)
             except OSError as failure:
                 error = failure
@@ -1837,19 +1849,56 @@ class Launcher:
                 {'enabled': sorted(enabled), 'disabled': sorted(disabled)}, indent=2), encoding='utf-8')
 
     # ---- game process ------------------------------------------------------------------------
+    def offer_system_files(self):
+        """A PKG extraction (game or update) has its system files beside the game: offers the
+        copy (system_files_beside) for the game folder and for an update folder with an
+        eboot.bin, the update's candidate checked against the game's param.sfo. False when a
+        copy was started: it runs in the background and presses Play again when it ends."""
+        game_dir = self.app['game_dir'] or '.'
+        update_dir = self.app.get('update_dir') or ''
+        folders = [(game_dir, False)]
+        if update_dir and not same_folder(update_dir, game_dir) and (Path(update_dir) / 'eboot.bin').is_file():
+            folders.append((update_dir, True))
+        for folder, is_update in folders:
+            reference = (game_sfo(game_dir) or None) if is_update else None
+            source = system_files_beside(folder, reference, game_dir if is_update else None)
+            if not source or not self.messagebox.askyesno(APP_NAME, _(
+                    'The files in {} look like a PKG extraction: the system files (param.sfo, icon0.png, '
+                    'pic1.png and the rest) are in\n\n{}\n\nCopy all of them into its sce_sys folder now? '
+                    'Files already there are kept.').format(folder, source)):
+                continue
+            self.adopt_in_background(source, folder)
+            return False
+        return True
+
+    def adopt_in_background(self, source, folder):
+        """Copies the Sc0 files off the Tk thread (a slow drive would freeze the window), shows
+        the result and presses Play again, so the next offer or check follows from what is on
+        disk."""
+        self.copying_system_files = True
+        self.play_button.configure(state='disabled')
+        self.status.configure(text=_('Copying the system files…'), fg=TEXT)
+
+        def work():
+            error = None
+            try:
+                adopt_system_files(source, folder)
+            except OSError as failure:
+                error = failure
+
+            def done():
+                self.copying_system_files = False
+                self.game_changed()  # whatever was copied already shows
+                if error:
+                    self.messagebox.showerror(APP_NAME, _('Could not copy the files: {}').format(error))
+                    self.show('game')
+                else:
+                    self.play()
+            self.ui_calls.put(done)
+        threading.Thread(target=work, daemon=True).start()
+
     def play(self):
-        if not self.process and gow3_dlss_control.running_game(PORT_DIR):
-            self.messagebox.showinfo(APP_NAME, 'Feche a partida atual antes de abrir outra ou aplicar as novas opções.')
-            return
-        if self.process:
-            return
-        try:
-            candidate = dict(self.app)
-            candidate.update({k:self.var(k,'app').get() for k in gow3_dlss_control.DEFAULTS})
-            candidate['gpu_id'] = self.var('gpu_id','app').get()
-            gow3_dlss_control.validate(candidate,PORT_DIR)
-        except ValueError as error:
-            self.messagebox.showerror('NVIDIA',str(error))
+        if self.process or getattr(self, 'copying_system_files', False):
             return
         self.collect()
         if not game_info(self.app['game_dir']):
@@ -1857,34 +1906,65 @@ class Launcher:
                                                   'Выберите папку игры с eboot.bin (CUSA01623).'))
             self.show('game')
             return
+        if not self.offer_system_files():
+            return
         missing = missing_game_files(self.app['game_dir'])
         if missing:
-            self.messagebox.showerror(APP_NAME, _('The game dump is incomplete. Missing files:\n\n{}\n\n'
+            self.messagebox.showerror(APP_NAME, _('The game dump is incomplete. Missing or empty files:\n\n{}\n\n'
                                                   'Dump the game again, or copy these files from a complete dump.')
-                                      .format('\n'.join(missing)))
+                                      .format('\n'.join(describe_missing(missing))))
+            self.show('game')
+            return
+        update_dir = self.app.get('update_dir') or ''
+        if update_dir and same_folder(update_dir, self.app['game_dir'] or '.'):
+            self.messagebox.showerror(APP_NAME, _('Choose two separate folders for the game and its update, '
+                                                  'or leave the update folder empty.'))
+            self.show('game')
+            return
+        missing = missing_game_files(update_dir, REQUIRED_UPDATE_FILES) if update_dir else []
+        if missing:
+            self.messagebox.showerror(APP_NAME, _('The update folder {} is incomplete. Missing or empty files:\n\n{}\n\n'
+                                                  'Choose the folder of the update (eboot.bin, sce_sys), or leave it empty.')
+                                      .format(update_dir, '\n'.join(describe_missing(missing))))
             self.show('game')
             return
         self.set_log('')
+        # The same last_run.log as --play, so a report from the PLAY button has the file too.
+        run_log = open_play_log(self.app)
         try:
             self.process = subprocess.Popen(run_command(), cwd=PORT_DIR, env=game_environment(self.app),
                                             stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
                                             stderr=subprocess.STDOUT, creationflags=NO_WINDOW, **NEW_GROUP)
-        except (OSError, ValueError) as error:
+        except OSError as error:
+            run_log.close()
             self.append(_('Could not start: {}', 'Не удалось запустить: {}').format(error) + '\n')
             self.process = None
             return
         self.job = GameJob(self.process)
-        threading.Thread(target=self.read_output, args=(self.process,), daemon=True).start()
+        threading.Thread(target=self.read_output, args=(self.process, run_log), daemon=True).start()
         self.play_button.configure(text=_('RUNNING'), state='disabled')
         self.status.configure(text=_('Preparing the game; it opens in its own window…',
                                      'Подготовка игры; она откроется в своём окне…'), fg=TEXT)
         if self.app.get('close_on_play'):
             self.root.after(5000, self.root.destroy)  # the game keeps running
 
-    def read_output(self, process):
-        for raw in iter(process.stdout.readline, b''):
-            self.output.put(raw.decode('utf-8', errors='replace'))
-        self.output.put((process.wait(),))
+    def read_output(self, process, run_log=None):
+        try:
+            for raw in iter(process.stdout.readline, b''):
+                text = raw.decode('utf-8', errors='replace')
+                if run_log:
+                    try:
+                        run_log.write(text)
+                    except (OSError, ValueError):
+                        # Disk full or folder gone: keep draining the pipe, or the game blocks
+                        # on its next print and the button stays at RUNNING.
+                        _close_quietly(run_log)
+                        run_log = None
+                self.output.put(text)
+        finally:
+            if run_log:
+                _close_quietly(run_log)
+            self.output.put((process.wait(),))
 
     def drain_output(self):
         while not self.ui_calls.empty():
@@ -1947,8 +2027,22 @@ class Launcher:
 
     # ---- updates -------------------------------------------------------------------------------
     def check_update(self, manual=False):
-        # This preview uses manual fork releases so upstream updates cannot replace its UI.
-        if manual: self.open_url(RELEASES_PAGE) if hasattr(self,'open_url') else open_url(RELEASES_PAGE)
+        """Helper thread: asks GitHub for the newest release and offers it when it is newer."""
+        try:
+            version, url, page = latest_release()
+        except (OSError, ValueError, KeyError) as failure:
+            if manual:
+                self.ui_calls.put(lambda error=failure: self.messagebox.showerror(
+                    APP_NAME, _('Could not check for updates: {}', 'Не удалось проверить обновления: {}').format(error)))
+            return
+
+        def show():
+            if version_tuple(version) > version_tuple(VERSION):
+                self.offer_update(version, url, page)
+            elif manual:
+                self.messagebox.showinfo(APP_NAME, _('You have the latest version ({}).',
+                                                         'У вас последняя версия ({}).').format(VERSION))
+        self.ui_calls.put(show)
 
     def offer_update(self, version, url, page):
         if self.update_box:
@@ -2161,15 +2255,57 @@ class GameJob:
             self.handle = None
 
 
+def run_log_path(settings):
+    """<saves folder>/last_run.log: the game's output, written by both launch paths."""
+    return Path(settings.get('user_dir') or DATA_DIR / 'user') / 'last_run.log'
+
+
+class _NullLog:
+    """Stands in for the run log when its folder cannot be written: the game still starts."""
+    def write(self, text):
+        pass
+
+    def close(self):
+        pass
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+
+def open_run_log(settings):
+    """The run log, truncated, line-buffered; a null log when the folder is unusable."""
+    path = run_log_path(settings)
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        return open(path, 'w', encoding='utf-8', buffering=1)
+    except (OSError, ValueError):
+        return _NullLog()
+
+
+def open_play_log(settings):
+    """The run log for the PLAY button. With 'close_on_play' the launcher exits 5 s after the
+    start and the reader thread dies with it: a truncated file would replace the previous full
+    log, so that mode leaves the file alone."""
+    if settings.get('close_on_play'):
+        return _NullLog()
+    return open_run_log(settings)
+
+
+def _close_quietly(log):
+    try:
+        log.close()
+    except (OSError, ValueError):
+        pass
+
+
 def play_without_window(settings):
     """--play: the game with the saved settings (shortcuts, Steam). Output goes to the console
     when there is one and to <saves folder>/last_run.log."""
     attach_stdio()
-    if gow3_dlss_control.running_game(PORT_DIR):
-        return 1
-    log_dir = Path(settings.get('user_dir') or DATA_DIR / 'user')
-    log_dir.mkdir(parents=True, exist_ok=True)
-    with open(log_dir / 'last_run.log', 'w', encoding='utf-8', buffering=1) as log:
+    with open_run_log(settings) as log:
         process = subprocess.Popen(run_command(), cwd=PORT_DIR, env=game_environment(settings),
                                    stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
                                    stderr=subprocess.STDOUT, creationflags=NO_WINDOW)
@@ -2231,8 +2367,7 @@ def main():
     args = sys.argv[1:]
     if args and args[0] in ('--run', '--script'):
         sys.exit(run_role(args))
-    saved = game_layout.resolve_settings(load_json(CONFIG_FILE, {}), PORT_DIR)
-    settings = {**APP_DEFAULTS, **gow3_dlss_control.recommended(gow3_dlss_control.gpu_name(str(PORT_DIR),str(saved.get('gpu_id','')))), **saved}
+    settings = {**APP_DEFAULTS, **load_json(CONFIG_FILE, {})}
     LANG = settings.get('ui_language') or windows_language()
     if not WINDOWS:
         integrate_desktop(settings.get('desktop_integration', True), os.environ.get('APPIMAGE'),
@@ -2242,7 +2377,7 @@ def main():
     if WINDOWS and FROZEN and UPDATE_DIR not in PORT_DIR.parents:
         shutil.rmtree(UPDATE_DIR, ignore_errors=True)  # what a finished update left behind
     # Without a usable game folder there is nothing to play yet: open the launcher instead.
-    if '--play' in args and (Path(settings['game_dir'] or '.') / 'eboot.bin').is_file():
+    if '--play' in args and ready_to_play(settings['game_dir'], settings.get('update_dir') or ''):
         sys.exit(play_without_window(settings))
     if WINDOWS:
         try:
@@ -2258,8 +2393,6 @@ def main():
     root.mainloop()
 
 
-from gow3_redesign import apply as apply_redesign
-Launcher = apply_redesign(Launcher, globals())
-
 if __name__ == '__main__':
-    main()
+    from gow3_launcher_dlss import main as nvidia_main
+    nvidia_main()
