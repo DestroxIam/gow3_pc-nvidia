@@ -2,7 +2,7 @@
 
 Fork do port de **Felipe Prado**, baseado na versão Windows **2.1.8**. [Leia os requisitos, limites e créditos completos em inglês](README.md).
 
-A integração local da 2.1.8 inclui testes limitados de SR/NR e FG 2× na RTX 5070. Instalação e publicação final são etapas separadas; a release existente permanece igual.
+Esta prévia 2.1.8 inclui SR/NR e FG 2× observados em testes limitados de gameplay na RTX 5070. Consulte as condições medidas e as limitações em [Validação](docs/VALIDATION.md) e [Alterações](CHANGELOG.md).
 
 Baixe o ZIP em [Releases](https://github.com/DestroxIam/gow3_pc-nvidia/releases). Coloque seu próprio dump **extraído**, **CUSA01623 / atualização 01.02**, em `Game/CUSA01623/`. Não incluímos jogos, ISO, PKG, firmware, saves ou caches de shaders.
 

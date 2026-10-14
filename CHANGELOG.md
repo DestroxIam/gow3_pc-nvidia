@@ -2,7 +2,7 @@
 
 Extends [Felipe Prado's original port](https://github.com/FelipePrado0/gow3_pc).
 Upstream `windows-v2.1.8` is `bb74e41cc3c9435c89e3bbd3994b608ad3cff627`.
-This source update is local; publication and final installation remain separate.
+This experimental preview retains the upstream port and dependency credits.
 
 - Integrate upstream CPU/ISA rewrite, dump validation/repair, UTF-8 logging and MSAA selection. The frozen role host includes iced-x86; missing mandatory imports or PyInstaller ERROR messages now fail the build even with exit code zero.
 - Retain DLSS preset-derived internal rendering, native-resolution DLAA, FSR fallback and the NVIDIA launcher design. DLAA and DLSS reconstruction are mutually exclusive.

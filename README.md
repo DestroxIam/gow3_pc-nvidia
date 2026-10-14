@@ -2,7 +2,7 @@
 
 An extension of **[Felipe Prado's God of War III Remastered PC port](https://github.com/FelipePrado0/gow3_pc)**, based on upstream **Windows v2.1.8**. Bring your own extracted PS4 game dump. **No game files are included.**
 
-The local 2.1.8 source integration includes parent-observed native SR/NR and FG 2× in limited RTX 5070 gameplay tests. Final deployment/publication remain separate; the existing release is unchanged. See the scoped validation notes in [Changes](CHANGELOG.md).
+This 2.1.8 preview includes native SR/NR and FG 2× observed in limited RTX 5070 gameplay tests. See the measured conditions and remaining limits in [Validation](docs/VALIDATION.md) and [Changes](CHANGELOG.md).
 
 **[Download the Windows preview](https://github.com/DestroxIam/gow3_pc-nvidia/releases)** · [NVIDIA setup](docs/NVIDIA.md) · [Changes](CHANGELOG.md) · [Build/source](docs/BUILD-NVIDIA.md) · [Português](README.pt-BR.md)
 
