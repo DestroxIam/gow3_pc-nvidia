@@ -1,6 +1,7 @@
 """GoW3 NVIDIA launch profile; UI and instant launch use the same settings."""
 import configparser
 import ctypes
+import hashlib
 import json
 import math
 import os
@@ -83,11 +84,117 @@ def recommended(name):
         p.update(dlss5_enabled=False,dlssg_mode='off',nvidia_fg_provider='xefg' if h['generation']<40 else 'dlssg')
     return p
 
+@lru_cache(maxsize=8)
+def _runtime_hash(path, size, modified, changed):
+    digest = hashlib.sha256()
+    with Path(path).open('rb') as source:
+        for chunk in iter(lambda:source.read(1024*1024), b''):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+def native_nr_capability(port=None, refresh=False):
+    """Opt-in build gate, not a claim that every GPU/preset/FG combination was tested."""
+    result = {'verified_build':False, 'available':False, 'reason':'Native NR AFTER-SR requires a verified runtime manifest.',
+              'model_present':False, 'forwarder_present':False, 'optiscaler_sha256':None, 'probe_sha256':None}
+    if port is None: return result
+    runtime = Path(port)/'bin-native-effects'
+    try:
+        marker = json.loads((runtime/'renderer-build.json').read_text(encoding='utf-8'))
+        if not isinstance(marker, dict) or marker.get('native_nr_after_sr') is not True: return result
+        if refresh: _runtime_hash.cache_clear()
+        for field, name in (('optiscaler_sha256','winmm.dll'), ('probe_sha256','gow3-probe.exe')):
+            expected = marker.get(field)
+            if not isinstance(expected, str) or not re.fullmatch(r'[0-9a-fA-F]{64}', expected):
+                result['reason'] = f'Native NR suspended: renderer-build.json needs {field} for {name}.'
+                return result
+            binary = runtime/name
+            stat = binary.stat()
+            if stat.st_size<=0: raise ValueError(f'{name} is empty')
+            actual = _runtime_hash(str(binary.resolve()), stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns)
+            result[field] = actual
+            if actual.lower()!=expected.lower():
+                result['reason'] = f'Native NR suspended: {name} does not match the verified runtime hash ({field}).'
+                return result
+        result['verified_build'] = True
+        for field, name in (('model_present','nvngx_dlssnr.dll'), ('forwarder_present','nvngx.dll_dlssnr.dll')):
+            file = runtime/'OptiScaler'/name
+            result[field] = file.is_file() and file.stat().st_size>0
+        missing = [name for field, name in (('model_present','nvngx_dlssnr.dll'), ('forwarder_present','nvngx.dll_dlssnr.dll'))
+                   if not result[field]]
+        if missing:
+            result['reason'] = 'Native NR requires user-provided model / forwarder in bin-native-effects/OptiScaler: ' + ', '.join(missing)
+        else:
+            result.update(available=True, reason='Native NR AFTER-SR available for experimental testing; one pass observed in the menu on RTX 5070 without FG. Gameplay SDK/NR execution is not yet confirmed.')
+    except (OSError, ValueError) as error:
+        result['reason'] = 'Native NR suspended: runtime capability could not be verified (' + str(error) + ').'
+    return result
+
+def effective_profile(settings, port=None):
+    """Requested next launch; this is not proof of SDK execution or GPU support."""
+    p = preferences(settings)
+    native = p['nvidia_pipeline']=='renderer' and p['nvidia_mode']!='off'
+    capability = native_nr_capability(port) if native else None
+    native_nr = bool(native and p['dlss5_enabled'] and capability['available'])
+    nr = p['dlss5_enabled'] and (not native or native_nr)
+    folder = ('bin-native-dlss' if p['dlssg_mode']=='off' and not native_nr else 'bin-native-effects') if native else (
+        'bin-dlss5' if p['nvidia_mode']!='off' or nr or p['dlssg_mode']!='off' else 'bin')
+    return {'runtime_folder':folder, 'pipeline':'renderer' if native else ('capture' if folder=='bin-dlss5' else 'base'),
+            'image_mode':p['nvidia_mode'], 'quality':p['nvidia_quality'] if p['nvidia_mode']=='dlss' else None,
+            'dimensions':renderer_dimensions(p) if native else None,
+            'nr_requested':p['dlss5_enabled'], 'nr_enabled':nr, 'nr_suspended':p['dlss5_enabled'] and native and not native_nr,
+            'nr_stage':'after_sr' if native_nr else ('capture' if nr else None), 'native_nr_capability':capability,
+            'nr_passes':p['nvidia_nr_passes'] if nr else None,
+            'fg_nr_combination_tested':False if nr and p['dlssg_mode']!='off' else None,
+            'fg_provider':p['nvidia_fg_provider'] if p['dlssg_mode']!='off' else None, 'fg_mode':p['dlssg_mode']}
+
+def profile_summary(settings, port=None):
+    profile = effective_profile(settings, port)
+    mode = profile['image_mode']
+    text = {'dlaa':'DLAA selecionado · reconstrução DLSS desligada · qualidade DLSS não se aplica.',
+            'dlss':'DLSS selecionado · DLAA desligado · preset ' + str(profile['quality']) + '.',
+            'off':'DLSS e DLAA desligados.'}[mode]
+    dims = profile['dimensions']
+    if dims:
+        text += f" {dims['input'][0]} × {dims['input'][1]} interno → {dims['output'][0]} × {dims['output'][1]} final."
+    elif mode!='off':
+        text += ' Compatibilidade processa a imagem pronta; a resolução interna não é calculada por esta guia.'
+    return text + ' Aplicado na próxima abertura; confirme a execução no registro do jogo.'
+
+def nr_control_state(settings, port, name):
+    p=preferences(settings); profile=effective_profile(p,port); h=hardware(name)
+    native=profile['pipeline']=='renderer'
+    gpu_allowed=h['rtx'] and (h['generation']>=50 or p['nvidia_older_nr'])
+    can_enable=bool(profile['native_nr_capability']['available'] and gpu_allowed) if native else True
+    selected=bool(profile['nr_enabled'] and (gpu_allowed if native else True))
+    if native:
+        capability=profile['native_nr_capability']
+        if not capability['available']:
+            text='NR nativo suspenso · ' + capability['reason'] + ' Preferência salva preservada.'
+        elif not h['rtx']:
+            text='NR AFTER-SR requer uma GeForce RTX identificada; execução ainda não confirmada.'
+        elif not gpu_allowed:
+            text='NR AFTER-SR: RTX 30/40 não foram fisicamente validadas; marque o teste experimental para habilitar.'
+        else:
+            text=('NR AFTER-SR selecionado para a próxima abertura.' if selected else 'NR AFTER-SR disponível; desligado.')
+            text+=' Uma passada foi observada no menu na RTX 5070 sem FG. Execução SDK/NR em gameplay ainda não confirmada. Mais passadas/presets são experimentais. '
+            text+='A inferência adiciona custo de GPU; não garante aumento de FPS. BEFORE-SR permanece bloqueado.'
+            if p['dlssg_mode']!='off': text+=' FG + NR ainda não validado; desligue FG para reproduzir o perfil testado.'
+            if h['generation']<50: text+=' RTX 30/40: teste experimental, sem validação física.'
+    else:
+        text=('NR de Compatibilidade selecionado para a próxima abertura · experimental; requer modelo separado.'
+              if selected else 'Neural Rendering desligado.')
+    return {'can_enable':can_enable, 'selected':selected, 'text':text}
+
 def validate(settings, port, name=None):
     p = preferences(settings); h = hardware(name or gpu_name(str(port),str(settings.get('gpu_id',''))))
     active = p['nvidia_mode']!='off' or p['dlss5_enabled'] or p['dlssg_mode']!='off'
     if active and not h['rtx']: raise ValueError('Os recursos NVIDIA exigem uma GeForce RTX. Desative-os e use o FSR na guia Display.')
     native=p['nvidia_pipeline']=='renderer' and p['nvidia_mode']!='off'
+    capability = native_nr_capability(port, refresh=True) if native else None
+    if native and p['dlss5_enabled'] and capability['verified_build'] and not capability['available']:
+        raise ValueError(capability['reason'])
+    if native and p['dlss5_enabled'] and capability['available'] and h['generation']<50 and not p['nvidia_older_nr']:
+        raise ValueError('Native NR AFTER-SR has only been physically tested on RTX 5070. RTX 30/40 require the explicit experimental test option.')
     if p['dlss5_enabled'] and not native and h['generation']<50 and not p['nvidia_older_nr']:
         raise ValueError('Neural Rendering nÃ£o foi validado nas RTX 30/40 com este modelo. Use o perfil recomendado ou marque o teste experimental.')
     if p['dlss5_enabled'] and not native and not (Path(port)/'bin-dlss5/OptiScaler/nvngx_dlssnr.dll').is_file():
@@ -99,19 +206,33 @@ def validate(settings, port, name=None):
             if not h['native_fg']: raise ValueError('A RTX 30 nÃ£o oferece geraÃ§Ã£o NVIDIA nativa. Escolha XeFG 2Ã— experimental ou desligue a geraÃ§Ã£o.')
             if not h['native_mfg'] and count>1 and not p['nvidia_ada_mfg']:
                 raise ValueError('Na RTX 40, use 2Ã— ou habilite explicitamente o MFG experimental.')
-            if any(not (Path(port)/'bin-dlss5'/'OptiScaler'/'streamline'/f).is_file() for f in FG_DLLS):
-                raise ValueError('As bibliotecas NVIDIA da geraÃ§Ã£o de quadros estÃ£o incompletas.')
+            folder = effective_profile(p,port)['runtime_folder']
+            missing = [f for f in FG_DLLS if not (Path(port)/folder/'OptiScaler'/'streamline'/f).is_file()]
+            if missing:
+                raise ValueError(f'Geração de quadros incompleta em {folder}/OptiScaler/streamline: ' + ', '.join(missing))
         elif count>1:
             raise ValueError('O perfil XeFG deste configurador permite 2Ã—. Os multiplicadores 3Ã—â€“6Ã— pertencem ao perfil NVIDIA.')
+    profile = effective_profile(p,port)
+    folder = profile['runtime_folder']
+    runtime = Path(port)/folder
+    if profile['pipeline']=='renderer' and not (runtime/'renderer-build.json').is_file():
+        raise ValueError(f'Renderizador DLSS nativo não instalado em {folder}. Reinstale esta versão ou escolha Compatibilidade.')
+    if folder!='bin':
+        required = ('gow3-probe.exe','gow3_dlss.dll','nvngx_dlss.dll') if folder=='bin-native-dlss' else (
+            'gow3-probe.exe','winmm.dll','OptiScaler.ini')
+        missing = [file for file in required if not (runtime/file).is_file()]
+        if missing:
+            raise ValueError(f'Instalação NVIDIA incompleta em {folder}: ' + ', '.join(missing))
     return p
 
 def configure_environment(env, settings, port):
     port=Path(port); p=validate(settings,port)
+    profile=effective_profile(p,port)
     if p['nvidia_pipeline']=='renderer' and p['nvidia_mode']!='off':
-        folder='bin-native-dlss' if p['dlssg_mode']=='off' else 'bin-native-effects'
+        folder=profile['runtime_folder']
         if not (port/folder/'renderer-build.json').is_file():
             raise ValueError('Renderizador DLSS nativo nÃ£o instalado. Reinstale esta versÃ£o ou escolha Compatibilidade.')
-    if p['nvidia_pipeline']=='renderer' and p['nvidia_mode']!='off' and p['dlssg_mode']=='off' and (port/'bin-native-dlss/renderer-build.json').is_file():
+    if profile['runtime_folder']=='bin-native-dlss':
         from importlib.util import spec_from_file_location,module_from_spec
         spec=spec_from_file_location('gow3_native_graphics_options',port/'scripts/graphics_options.py')
         graphics=module_from_spec(spec);spec.loader.exec_module(graphics)
@@ -126,7 +247,7 @@ def configure_environment(env, settings, port):
         return env
     for key in ('GOW3_PROBE','GOW3_NVIDIA_QUALITY','GOW3_FSR1','GOW3_RCAS'):
         env.pop(key,None)
-    nvidia=p['nvidia_mode']!='off'; fg=p['dlssg_mode']!='off'; nr=p['dlss5_enabled']
+    nvidia=p['nvidia_mode']!='off'; fg=p['dlssg_mode']!='off'; nr=profile['nr_enabled']
     if not (nvidia or fg or nr): return env
     native=nvidia and p['nvidia_pipeline']=='renderer' and (port/'bin-native-effects/renderer-build.json').is_file()
     runtime=port/('bin-native-effects' if native else 'bin-dlss5')
@@ -157,6 +278,22 @@ def configure_environment(env, settings, port):
     if native:
         updates['DlssNr'].update(Enabled='false',NativeMotion='false',NativeDepthFinder='false',NativeUpscaler='false',
                                 NativeInput='false',NativeFrameGenerationOnly='true',FinishedPicture='false',RunBeforeSR='true')
+        if profile['nr_stage']=='after_sr':
+            updates['Upscalers']['VulkanUpscaler']='dlss_12'  # DLSS_on12 native-input bridge
+            updates['VulkanInterop']={'InputsInGeneral':'true','DredDiagnostics':'false'}
+            updates['DLSS']={'Enabled':'true'}
+            updates['DlssNr'].update(Enabled='true',RunBeforeSR='false',DeferredDLSS='false',UseProxy='false',
+                Precision='0',ModelResolutionAuto='false',SpatialCompression='false',DetailReuse='false',
+                LocalStructure='1.0',LocalTone='1.0',SkinStructure='1.0',AutoMask='true',ColourEncoding='auto',
+                LutFile='',AutoCapture='false',ProbeD3D11='false',ProxyProbe='false',FrameStats='false')
+            updates['Sharpness']={'OverrideSharpness':'true','Sharpness':'0'}
+            updates['CAS']={'Enabled':'false'}
+            updates['OutputScaling']={'Enabled':'false'}
+            updates['Hotfix']={'RestoreComputeSignature':'false','RestoreGraphicSignature':'false',
+                              'ColorResourceBarrier':'auto','OutputResourceBarrier':'auto'}
+            if not fg:
+                updates['FrameGen'].update(FGInput='nofg',FGOutput='nofg')
+            updates['Log'].update(LogLevel='2',LogAsync='false')
     # Clear inherited per-pass look overrides so the selected preset really controls all passes.
     if cfg.has_section('DlssNr'):
         for key in list(cfg['DlssNr']):

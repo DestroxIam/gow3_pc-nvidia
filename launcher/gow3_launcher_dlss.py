@@ -12,6 +12,7 @@ game without the window (`--play`), run.py (`--run`) and the preparation scripts
 so a packaged port needs no Python installation.
 """
 import glob
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -1034,6 +1035,8 @@ class Launcher:
         self.nvidia_hardware = gow3_dlss_control.hardware(name)
         self.nvidia_gpu_label = self.ttk.Label(f, text=name, foreground=TEXT)
         self.nvidia_gpu_label.grid(row=self.next_row(f), column=0, columnspan=2, sticky='w', pady=(0,8))
+        self.nvidia_build_label = self.ttk.Label(f, text='', foreground=MUTED, wraplength=self.px(680))
+        self.nvidia_build_label.grid(row=self.next_row(f), column=0, columnspan=2, sticky='w', pady=(0,8))
         self.section(f, 'DLSS / DLAA', top=4)
         self.row(f,'Integração',self.choice(f,'nvidia_pipeline','app',[
             ('renderer',('Nativa · resolução interna automática',)),
@@ -1055,15 +1058,20 @@ class Launcher:
             'O preset calcula a resolução interna automaticamente. DLAA usa o tamanho final sem upscale.',restart=True)
         self.nvidia_image_status = self.ttk.Label(f, text='', foreground=ACCENT_HI, wraplength=self.px(680))
         self.nvidia_image_status.grid(row=self.next_row(f), column=0, columnspan=2, sticky='w', pady=(8,0))
+        self.nvidia_execution_status = self.ttk.Label(f, text='Execução ainda não confirmada pelo SDK. '
+            'Menus e vídeos podem usar uma etapa espacial sem DLSS temporal.', foreground=MUTED, wraplength=self.px(680))
+        self.nvidia_execution_status.grid(row=self.next_row(f), column=0, columnspan=2, sticky='w', pady=(6,0))
         self.note(f, 'Na integração nativa, DLSS e DLAA atuam no renderizador. A cena é desenhada na resolução interna calculada e reconstruída '
                      'para a resolução final. A escolha manual em Desempenho vale quando esses modos estão desligados. '
                      'A resolução física da tela permanece a do monitor.', top=6)
         self.section(f, 'DLSS5 · Neural Rendering')
         self.nvidia_nr_effective=self.tk.BooleanVar(value=False)
         self.nvidia_nr_switch=self.check(f, 'dlss5_enabled', 'app', 'Ativar Neural Rendering',
-            'Disponível na integração Compatibilidade. Suspenso quando DLSS / DLAA usam o renderizador nativo.',
+            'NR nativo AFTER-SR exige build/DLL verificados e modelo separado. Builds antigos mantêm NR suspenso.',
             var=self.nvidia_nr_effective,restart=True)
         self.nvidia_nr_switch.configure(command=lambda:self.var('dlss5_enabled','app').set(self.nvidia_nr_effective.get()))
+        self.nvidia_nr_status = self.ttk.Label(f, text='', foreground=MUTED, wraplength=self.px(680))
+        self.nvidia_nr_status.grid(row=self.next_row(f), column=0, columnspan=2, sticky='w', pady=(6,0))
         self.nvidia_nr_widgets = []
         self.nvidia_nr_widgets.append(self.row(f, 'Preset visual', self.choice(f, 'nvidia_nr_style', 'app', [
             ('standard', ('Padrão',)), ('natural', ('Natural',)), ('cinematic', ('Cinematográfico',))]), restart=True))
@@ -1104,7 +1112,7 @@ class Launcher:
         self.note(f, 'Salve e clique em JOGAR. Mudanças durante uma partida entram na próxima abertura. '
                      'Home abre os ajustes avançados do mod; F6 compara Neural Rendering ligado / desligado. '
                      'A integração é experimental e pode produzir rastros em movimento.', top=8)
-        for key in ('nvidia_mode','nvidia_quality','nvidia_output_res','nvidia_pipeline','dlss5_enabled','gpu_id'):
+        for key in gow3_dlss_control.DEFAULTS.keys() | {'gpu_id'}:
             self.var(key, 'app').trace_add('write', self.refresh_nvidia)
         self.refresh_nvidia()
 
@@ -1112,40 +1120,40 @@ class Launcher:
         name = gow3_dlss_control.gpu_name(str(PORT_DIR), self.var('gpu_id','app').get())
         h = self.nvidia_hardware = gow3_dlss_control.hardware(name)
         self.nvidia_gpu_label.configure(text=name)
+        selected = {k:self.var(k,'app').get() for k in gow3_dlss_control.DEFAULTS}
+        profile = gow3_dlss_control.effective_profile(selected, PORT_DIR)
+        self.nvidia_build_label.configure(text=f'{VERSION} · experimental · ' +
+            ('pacote instalado' if FROZEN else 'configurador em código-fonte') +
+            f"\nRuntime previsto: {PORT_DIR / profile['runtime_folder'] / 'gow3-probe.exe'}")
         mode = self.var('nvidia_mode','app').get()
         native=self.var('nvidia_pipeline','app').get()=='renderer' and mode!='off'
         self.nvidia_dlss_quality.configure(state='readonly' if mode=='dlss' else 'disabled')
         for widget in self.nvidia_quality_widgets:
             if mode=='dlss': widget.grid()
             else: widget.grid_remove()
-        self.nvidia_image_status.configure(text={
-            'dlaa':'DLAA ativo · DLSS de reconstrução desligado.',
-            'dlss':'DLSS ativo · DLAA desligado.',
-            'off':'DLSS e DLAA desligados.'}.get(mode,''))
-        if native:
-            dims=gow3_dlss_control.renderer_dimensions({k:self.var(k,'app').get() for k in gow3_dlss_control.DEFAULTS})
-            self.nvidia_image_status.configure(text=('DLAA ativo · DLSS desligado · ' if mode=='dlaa' else 'DLSS ativo · DLAA desligado · ')+
-                f'{dims["input"][0]} × {dims["input"][1]} interno → {dims["output"][0]} × {dims["output"][1]} final')
+        self.nvidia_image_status.configure(text=gow3_dlss_control.profile_summary(selected, PORT_DIR))
         self.nvidia_output_choice.configure(state='readonly' if native else 'disabled')
-        nr = self.var('dlss5_enabled','app').get() and not native
+        nr_state=gow3_dlss_control.nr_control_state(selected, PORT_DIR, name)
+        nr = nr_state['selected']
         self.nvidia_nr_effective.set(bool(nr))
-        self.nvidia_nr_switch.configure(state='disabled' if native else 'normal')
-        self.nvidia_fg_provider_choice.configure(state='readonly')
+        self.nvidia_nr_status.configure(text=nr_state['text'])
+        self.nvidia_nr_switch.configure(state='normal' if nr_state['can_enable'] else 'disabled')
+        self.nvidia_fg_provider_choice.configure(state='readonly' if h['rtx'] and mode!='off' else 'disabled')
+        # Keep "Off" reachable even when the saved image mode or GPU cannot provide FG.
         self.nvidia_fg_choice.configure(state='readonly')
         for widget in self.nvidia_nr_widgets:
             widget.configure(state=('readonly' if isinstance(widget,self.ttk.Combobox) else 'normal') if nr else 'disabled')
         self.nvidia_ada_switch.configure(state='normal' if h['generation']==40 else 'disabled')
         self.nvidia_older_switch.configure(state='normal' if h['rtx'] and h['generation']<50 else 'disabled')
         text = 'DLSS / DLAA disponíveis nas GeForce RTX. '
-        if h['native_mfg']: text += 'RTX 50: NVIDIA 2×–6×. Neste computador, o SDK informou até cinco quadros gerados.'
+        if h['native_mfg']: text += 'RTX 50: controles NVIDIA 2×–6×. Neste fork, o caminho nativo foi observado com 2×; 3×–6× são experimentais.'
         elif h['native_fg']: text += 'RTX 40: NVIDIA 2×; acima disso, somente com MFG experimental. Neural Rendering ainda não validado.'
         elif h['rtx']: text += 'RTX 30: geração NVIDIA nativa indisponível; alternativa XeFG 2× experimental. Neural Rendering ainda não validado.'
         else: text = 'Use o FSR nas opções do Display / Graphics. Recursos NVIDIA exigem uma GeForce RTX.'
         self.nvidia_compatibility.configure(text=text)
         if native:
-            self.nvidia_compatibility.configure(text='Neste caminho, geração de quadros 2× foi confirmada. Neural Rendering fica suspenso: '
-                'a combinação com o novo renderizador apresentou falha de interoperação; use Compatibilidade para esse efeito. '
-                'Os valores salvos são preservados para alternar de volta.')
+            self.nvidia_compatibility.configure(text=text + '\n' + nr_state['text'] +
+                '\nA seleção não confirma execução; consulte mensagens do SDK e o NVIDIA.log desta partida.')
         if hasattr(self,'status') and hasattr(self,'game_patch_title'): self.refresh_status()
 
     def save_nvidia(self):
@@ -1865,8 +1873,12 @@ class Launcher:
             self.show('game')
             return
         self.set_log('')
+        self.nvidia_execution_status.configure(text='Aguardando confirmação do SDK nesta partida. '
+            'A seleção e o contador FPS não comprovam uma avaliação DLSS.')
         try:
-            self.process = subprocess.Popen(run_command(), cwd=PORT_DIR, env=game_environment(self.app),
+            env = game_environment(self.app)
+            diagnostics = launch_diagnostics(self.app, env)
+            self.process = subprocess.Popen(run_command(), cwd=PORT_DIR, env=env,
                                             stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
                                             stderr=subprocess.STDOUT, creationflags=NO_WINDOW, **NEW_GROUP)
         except (OSError, ValueError) as error:
@@ -1874,17 +1886,25 @@ class Launcher:
             self.process = None
             return
         self.job = GameJob(self.process)
-        threading.Thread(target=self.read_output, args=(self.process,), daemon=True).start()
+        self.active_run_id = str(time.time_ns())
+        diagnostics['run_id'] = self.active_run_id
+        log_dir = Path(self.app.get('user_dir') or DATA_DIR / 'user')
+        output_closed = threading.Event()
+        self.root.bind('<Destroy>', lambda event: output_closed.set() if event.widget==self.root else None, add='+')
+        threading.Thread(target=self.read_output, args=(self.process, log_dir, diagnostics, output_closed, self.active_run_id), daemon=False).start()
         self.play_button.configure(text=_('RUNNING'), state='disabled')
         self.status.configure(text=_('Preparing the game; it opens in its own window…',
                                      'Подготовка игры; она откроется в своём окне…'), fg=TEXT)
         if self.app.get('close_on_play'):
             self.root.after(5000, self.root.destroy)  # the game keeps running
 
-    def read_output(self, process):
-        for raw in iter(process.stdout.readline, b''):
-            self.output.put(raw.decode('utf-8', errors='replace'))
-        self.output.put((process.wait(),))
+    def read_output(self, process, log_dir, diagnostics=None, output_closed=None, run_id=None):
+        def forward(text):
+            if output_closed is None or not output_closed.is_set():
+                self.output.put((run_id, text) if run_id is not None else text)
+        code = record_game_output(process, log_dir, forward, diagnostics)
+        if output_closed is None or not output_closed.is_set():
+            self.output.put((run_id, (code,)) if run_id is not None else (code,))
 
     def drain_output(self):
         while not self.ui_calls.empty():
@@ -1892,16 +1912,27 @@ class Launcher:
         try:
             for _i in range(500):
                 item = self.output.get_nowait()
+                if isinstance(item, tuple) and len(item)==2:
+                    run_id, item = item
+                    if run_id!=getattr(self, 'active_run_id', None):
+                        continue  # late output from a previous run cannot change current SDK status
                 if isinstance(item, tuple):
                     self.append(_('\nThe game exited (code {}).\n', '\nИгра завершилась (код {}).\n').format(item[0]))
                     self.process = None
+                    self.active_run_id = None
+                    self.nvidia_execution_status.configure(text='Partida encerrada · sem execução SDK atual confirmada.')
                     if self.job:
                         self.job.close()
                     self.refresh_status()
                 else:
+                    evidence = runtime_evidence(item)
+                    if evidence:
+                        self.nvidia_execution_status.configure(text=evidence)
                     if 'Entering original x86-64 code' in item:
                         self.status.configure(text=_('The game is running.', 'Игра запущена.'), fg=TEXT)
                     elif 'restarting through run.py' in item:
+                        self.nvidia_execution_status.configure(text='Reiniciando · aguardando nova avaliação do SDK. '
+                            'A confirmação anterior não vale para esta execução.')
                         self.status.configure(text=_('Restarting with the new settings…', 'Перезапуск с новыми настройками…'), fg=TEXT)
                     self.append(item)
         except queue.Empty:
@@ -2161,6 +2192,99 @@ class GameJob:
             self.handle = None
 
 
+def launch_diagnostics(settings, env):
+    """Safe, explicit launch identity. Never dump the inherited environment or credentials."""
+    profile = gow3_dlss_control.effective_profile(settings, PORT_DIR)
+    runtime = Path(env.get('GOW3_PROBE') or find_tool('gow3-probe.exe') or
+                   PORT_DIR / profile['runtime_folder'] / 'gow3-probe.exe')
+    try:
+        marker = json.loads((runtime.parent / 'renderer-build.json').read_text(encoding='utf-8'))
+        if not isinstance(marker, dict): marker = {}
+    except (OSError, ValueError):
+        marker = {}
+    build = {k:str(marker[k])[:512] for k in ('build_id','version','upstream_commit','probe_sha256') if k in marker}
+    digest = hashlib.sha256()
+    try:
+        with runtime.open('rb') as source:
+            for chunk in iter(lambda:source.read(1024*1024), b''):
+                digest.update(chunk)
+        runtime_hash = digest.hexdigest()
+    except OSError:
+        runtime_hash = None
+    return {'launcher_version':VERSION, 'launcher_kind':'packaged' if FROZEN else 'source',
+            'experimental':True, 'port_directory':str(PORT_DIR), 'runtime':str(runtime),
+            'runtime_sha256':runtime_hash, 'runtime_build':build, 'profile':profile,
+            'runtime_matches_manifest':runtime_hash==build['probe_sha256'] if runtime_hash and 'probe_sha256' in build else None,
+            'config':env.get('GOW3_CONFIG', str(PORT_DIR / 'gow3.ini')),
+            'gpu_id':str(settings.get('gpu_id','')), 'process_role':'run.py (runtime may restart)',
+            'diagnostics_enabled':{key:env.get(key,'0') for key in (
+                'GOW3_VK_VALIDATION','GOW3_GPU_PROFILE','GOW3_FRAME_STATS','GOW3_PERF_DIAG','GOW3_FRAME_CAPTURE_KEY')},
+            'note':'Requested configuration; executable hash identifies the file at launch. Not proof of SDK evaluation. '
+                   'Menus/videos and unsuitable temporal inputs may use a spatial path. See runtime/SDK messages.'}
+
+
+def runtime_evidence(text):
+    """Only explicit renderer evaluations count; overlay selections are not execution evidence."""
+    if re.search(r'GoW3.*(?:skipp|spatial|temporal.*(?:invalid|unavailable))', text, re.I):
+        return 'Renderizador informou fallback/entrada temporal indisponível: ' + text.strip()[:500]
+    if re.search(r'GoW3 native DLSS:.*\bevaluation\s+[1-9][0-9]*\b', text):
+        return 'Última avaliação DLSS confirmada pelo renderizador nesta partida: ' + text.strip()[:500]
+    return None
+
+
+def record_game_output(process, log_dir, forward, diagnostics=None):
+    """Persist GUI and shortcut launches alike; retain the previous run before replacing it."""
+    log_dir = Path(log_dir)
+    log = None
+    def safe_forward(text):
+        # A closed console must not stop pipe consumption, file logging or process.wait().
+        try:
+            forward(text)
+        except (OSError, ValueError):
+            pass
+    try:
+        log_dir.mkdir(parents=True, exist_ok=True)
+        path = log_dir / 'last_run.log'
+        if path.exists():
+            archive = log_dir / 'log' / ('run-' + time.strftime('%Y%m%d-%H%M%S') +
+                                        '-' + str(time.time_ns()) + '.log')
+            archive.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(path, archive)
+        log = path.open('w', encoding='utf-8', buffering=1)
+    except OSError as error:
+        safe_forward('Could not save the runtime log: ' + str(error) + '\n')
+    def write_log(text):
+        nonlocal log
+        if log:
+            try:
+                log.write(text)
+            except (OSError, ValueError) as error:
+                safe_forward('Could not continue saving the runtime log: ' + str(error) + '\n')
+                try:
+                    log.close()
+                except (OSError, ValueError):
+                    pass
+                log = None
+    try:
+        if diagnostics is not None:
+            header = '[GoW3 launch] ' + json.dumps(diagnostics, ensure_ascii=False) + '\n'
+            safe_forward(header)
+            write_log(header)
+        for raw in iter(process.stdout.readline, b''):
+            text = raw.decode('utf-8', errors='replace')
+            safe_forward(text)
+            write_log(text)
+        code = process.wait()
+        write_log('\nThe game exited (code {}, 0x{:08X}).\n'.format(code, code & 0xffffffff))
+        return code
+    finally:
+        if log:
+            try:
+                log.close()
+            except (OSError, ValueError) as error:
+                safe_forward('Could not finish saving the runtime log: ' + str(error) + '\n')
+
+
 def play_without_window(settings):
     """--play: the game with the saved settings (shortcuts, Steam). Output goes to the console
     when there is one and to <saves folder>/last_run.log."""
@@ -2168,19 +2292,17 @@ def play_without_window(settings):
     if gow3_dlss_control.running_game(PORT_DIR):
         return 1
     log_dir = Path(settings.get('user_dir') or DATA_DIR / 'user')
-    log_dir.mkdir(parents=True, exist_ok=True)
-    with open(log_dir / 'last_run.log', 'w', encoding='utf-8', buffering=1) as log:
-        process = subprocess.Popen(run_command(), cwd=PORT_DIR, env=game_environment(settings),
-                                   stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
-                                   stderr=subprocess.STDOUT, creationflags=NO_WINDOW)
-        for raw in iter(process.stdout.readline, b''):
-            text = raw.decode('utf-8', errors='replace')
-            log.write(text)
-            try:
-                sys.stdout.write(text)
-            except (OSError, ValueError):
-                pass
-        return process.wait()
+    env = game_environment(settings)
+    diagnostics = launch_diagnostics(settings, env)
+    process = subprocess.Popen(run_command(), cwd=PORT_DIR, env=env,
+                               stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                               stderr=subprocess.STDOUT, creationflags=NO_WINDOW)
+    def forward(text):
+        try:
+            sys.stdout.write(text)
+        except (OSError, ValueError):
+            pass
+    return record_game_output(process, log_dir, forward, diagnostics)
 
 
 def version_tuple(text):
