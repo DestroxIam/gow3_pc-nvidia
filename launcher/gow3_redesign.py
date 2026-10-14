@@ -1,5 +1,6 @@
 """Native Tk presentation layer. Settings and launch behavior remain in the existing launcher."""
 from pathlib import Path
+import sys
 import tkinter as tk
 
 PAGE = '#030b10'
@@ -10,7 +11,8 @@ TEXT = '#eee7da'
 MUTED = '#a1adb5'
 RED = '#ef271f'
 HOVER = '#ff4035'
-ASSETS = Path(__file__).resolve().parent / 'redesign-assets'
+ASSETS = ((Path(sys.executable).resolve().parent / 'launcher') if getattr(sys, 'frozen', False)
+          else Path(__file__).resolve().parent) / 'redesign-assets'
 
 def rounded(canvas, x0, y0, x1, y1, radius, **options):
     r=min(radius,(x1-x0)/2,(y1-y0)/2)

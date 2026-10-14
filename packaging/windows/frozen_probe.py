@@ -37,7 +37,7 @@ def main():
         raise RuntimeError('iced_x86 native decode failed')
     if Image.new('RGB',(2,2)).size!=(2,2):raise RuntimeError('Pillow image failed')
     ImageFont.load_default()
-    for name in ('graphics_options','isa_rewrite','patches','prepare','gow3_dlss_control','gow3_launcher_dlss'):
+    for name in ('graphics_options','isa_rewrite','patches','prepare','gow3_dlss_control','gow3_launcher_dlss','gow3_redesign'):
         module=importlib.import_module(name)
         path=args.source/('launcher' if name.startswith('gow3_') else 'scripts')/(name+'.py')
         loaded=module.__loader__.get_code(name)
@@ -45,6 +45,8 @@ def main():
         checks[name]=code_signature(loaded)==code_signature(wanted)
     launcher=importlib.import_module('gow3_launcher_dlss')
     if launcher.VERSION!='2.1.8-nvidia-dev':raise RuntimeError('Wrong frozen launcher version')
+    redesign=importlib.import_module('gow3_redesign')
+    checks['redesign_asset_location']=redesign.ASSETS == Path(sys.executable).resolve().parent/'launcher/redesign-assets'
     result={'passed':all(checks.values()),'launcher_version':launcher.VERSION,'python_version':sys.version.split()[0],
             'versions':{name:importlib.metadata.version(name) for name in ('Pillow','iced-x86','PyInstaller')},
             'module_origins':origins,'source_checks':checks,'role':'--script; imports only; no game launch'}
